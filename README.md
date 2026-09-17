@@ -277,11 +277,38 @@ stripe-webhook-key: "<STRIPE_WEBHOOK_KEY>"
 uri: "<MONGODB_URI>"
 ```
 
-其中 MongoDB URI 是硬性要求
+其中 MongoDB URI 是硬性要求。
 
 
 
-MongoDB atlas云端：
+stripe：测试 Secret Key 以 `sk_test_` 开头，只能放在服务端；Publishable Key 以 `pk_test_` 开头，可以给前端使用。stripe-webhook-key以 `whsec_` 开头。
+
+本地开发最方便的是安装 Stripe CLI，然后执行：
+
+```
+stripe login
+stripe listen --forward-to localhost:8081/webhook/stripe
+```
+
+测试支付时可以使用 Stripe 官方测试卡：
+
+```
+卡号：4242 4242 4242 4242
+有效期：任意未来日期，例如 12/34
+CVC：任意三位，例如 123
+```
+
+测试环境不会产生真实扣款。
+
+前端web要设置：
+
+```
+NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY
+```
+
+
+
+MongoDB atlas云端：选择 Go Driver，复制连接字符串
 
 ```
 yuflyren_ridesharedb_user
@@ -290,11 +317,17 @@ uri: "<REDACTED_MONGODB_URI>"
 
 ```
 
-stripe：
 
 
+注意先把 tiltfile里的 cmd.bat路径 改成 `\\`，如：
 
-注意先把 tiltfile里的 cmd.bat路径 改成 `\\`
+- 使用 Windows 反斜杠路径；
+- 明确通过 `cmd /c` 执行 `.bat`。
+
+```
+if os.name == 'nt':
+  gateway_compile_cmd = 'cmd /c infra\\development\\docker\\api-gateway-build.bat'
+```
 
 
 
@@ -302,21 +335,34 @@ stripe：
 
 ```
 kubectl get pods -w
+kubectl get pods
+kubectl logs <pod名称>
+kubectl describe pod <pod名称>
 ```
 
 等待这些 Pod 都进入 `Running`
 
-
+```dockerfile
+kubectl config use-context docker-desktop
+kubectl config current-context  # 确认操作的是 docker-desktop
+kubectl cluster-info
+```
 
 最后：
 
 打开docker，启动k8s
 
-```
-tilt up
+```sh
+tilt up  # Tilt 会重新创建所有 Kubernetes 资源
 ```
 
+```shell
+tilt down # 删除当前 Tiltfile 部署到 Kubernetes 的开发环境资源
+```
 
+> `Ctrl+C`：停止 Tilt 监控，但 Kubernetes 中的服务可能继续运行。
+>
+> `tilt down`：真正删除 Tilt 部署的服务。 -> 想彻底关闭项目的本地微服务环境
 
 然后访问：
 
@@ -491,3 +537,161 @@ OwnerID: suitableDriverID
 2. 批量广播：同时通知多名司机，但第一个接受的人需要通过原子操作锁定订单，其他司机立即收到“订单已被接走”。
 
 当前项目只实现了最简单的“随机单播”。如果你的目标是演示多人抢单，需要补充广播与防重复接单机制。
+
+
+
+# RabbitMQ
+
+RabbitMQ 事件传递既可以在管理页面观察，也可以在代码中追踪
+
+RabbitMQ 事件传递既可以在管理页面观察，也可以在代码中追踪。
+
+## RabbitMQ 管理页面
+
+Tilt 运行时访问：
+
+[http://localhost:15672](http://localhost:15672/)
+
+登录：
+
+```
+用户名：guest
+密码：guest
+```
+
+进入后重点查看：
+
+- `Exchanges` → `trip`
+- `Queues and Streams`
+
+项目所有业务事件都通过名为 `trip` 的 Topic Exchange 传递。
+
+主要队列包括：
+
+```
+find_available_drivers
+driver_cmd_trip_request
+driver_trip_response
+notify_driver_no_drivers_found
+notify_driver_assign
+payment_trip_response
+notify_payment_session_created
+payment_success
+dead_letter_queue
+```
+
+队列名称定义在 [events.go](D:/Code/ride-sharing-main/ride-sharing/shared/messaging/events.go)。
+
+因为消费者会立即取走消息，所以队列中的 `Ready` 经常显示 `0`。RabbitMQ 默认不是事件历史数据库，消息消费成功后就没有了；可以观察页面中的 Publish/Deliver 曲线。
+
+## 一次下单的事件流
+
+```
+乘客点击车型
+    │
+    ▼
+Trip Service
+发布 trip.event.created
+    │
+    ▼
+trip Exchange
+    │
+    ▼
+find_available_drivers
+    │
+    ▼
+Driver Service 随机选择司机
+发布 driver.cmd.trip_request
+    │
+    ▼
+driver_cmd_trip_request
+    │
+    ▼
+API Gateway
+通过 WebSocket 通知司机页面
+    │
+    ▼
+司机点击 Accept trip
+发布 driver.cmd.trip_accept
+    │
+    ▼
+driver_trip_response
+    │
+    ▼
+Trip Service
+更新订单并发布：
+├── trip.event.driver_assigned
+└── payment.cmd.create_session
+```
+
+支付部分继续经过：
+
+```
+payment.cmd.create_session
+    ↓
+payment_trip_response
+    ↓
+Payment Service
+    ↓
+调用 Stripe 创建 Checkout
+    ↓
+payment.event.session_created
+    ↓
+notify_payment_session_created
+    ↓
+API Gateway WebSocket
+    ↓
+乘客页面显示付款
+```
+
+## 代码位置
+
+事件名称定义：
+
+[shared/contracts/amqp.go](D:/Code/ride-sharing-main/ride-sharing/shared/contracts/amqp.go)
+
+Exchange、队列创建和绑定：
+
+[shared/messaging/rabbitmq.go](D:/Code/ride-sharing-main/ride-sharing/shared/messaging/rabbitmq.go)
+
+通用发布方法：
+
+```
+rabbitmq.PublishMessage(ctx, routingKey, message)
+```
+
+通用消费方法：
+
+```
+rabbitmq.ConsumeMessages(queueName, handler)
+```
+
+具体业务位置：
+
+- 创建行程事件：[trip_publisher.go](D:/Code/ride-sharing-main/ride-sharing/services/trip-service/internal/infrastructure/events/trip_publisher.go)
+- 寻找并通知司机：[trip_consumer.go](D:/Code/ride-sharing-main/ride-sharing/services/driver-service/trip_consumer.go)
+- 司机接受或拒绝：[driver_consumer.go](D:/Code/ride-sharing-main/ride-sharing/services/trip-service/internal/infrastructure/events/driver_consumer.go)
+- 创建支付会话：[trip_consumer.go](D:/Code/ride-sharing-main/ride-sharing/services/payment-service/internal/events/trip_consumer.go)
+- 支付成功处理：[payment_consumer.go](D:/Code/ride-sharing-main/ride-sharing/services/trip-service/internal/infrastructure/events/payment_consumer.go)
+- RabbitMQ 转 WebSocket：[queue_consumer.go](D:/Code/ride-sharing-main/ride-sharing/shared/messaging/queue_consumer.go)
+
+## 最直观的观察方法
+
+在 Tilt 页面打开每个服务的日志，或者执行：
+
+```
+kubectl logs -f deployment/trip-service
+kubectl logs -f deployment/driver-service
+kubectl logs -f deployment/payment-service
+kubectl logs -f deployment/api-gateway
+```
+
+然后从网页创建订单。日志中会出现：
+
+```
+Publishing message with routing key: trip.event.created
+Received a message: ...
+Publishing message with routing key: driver.cmd.trip_request
+```
+
+这样比在 RabbitMQ 队列页面等待消息更清楚，因为消息通常会被瞬间消费。
