@@ -132,6 +132,38 @@ func TestNewRejectsInvalidRiderSets(t *testing.T) {
 	}
 }
 
+func TestMergeCombinesWorkerOwnedStatistics(t *testing.T) {
+	riders := makeRiders(3)
+	first := mustAccumulator(t, riders)
+	second := first.Fork()
+	observe(t, first, 1, 3)
+	observe(t, second, 2, 4)
+	observe(t, second, 2, 5)
+
+	if err := first.Merge(second); err != nil {
+		t.Fatalf("Merge() error = %v", err)
+	}
+	summary := first.Summary()
+	if summary.AssignmentCount != 3 || summary.RiderOrderCountSum != 3 {
+		t.Fatalf("merged counts = %+v", summary)
+	}
+	if summary.Bottom10[0] != (RiderOrderCount{RiderUID: 3, OrderCount: 0}) {
+		t.Fatalf("merged Bottom10 = %+v", summary.Bottom10)
+	}
+	assertNear(t, summary.AverageDistanceMeters, 4)
+	if summary.P95DistanceMeters != 5 || summary.MaxDistanceMeters != 5 {
+		t.Fatalf("merged distances = %+v", summary)
+	}
+}
+
+func TestMergeRejectsDifferentRiderLayouts(t *testing.T) {
+	first := mustAccumulator(t, []model.Rider{{UID: 1}, {UID: 2}})
+	second := mustAccumulator(t, []model.Rider{{UID: 2}, {UID: 1}})
+	if err := first.Merge(second); err == nil {
+		t.Fatal("Merge() error = nil, want rider layout error")
+	}
+}
+
 func makeRiders(count int) []model.Rider {
 	riders := make([]model.Rider, count)
 	for index := range riders {

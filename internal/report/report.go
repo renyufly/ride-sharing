@@ -43,7 +43,7 @@ type Accumulator struct {
 	riderIndex                map[uint64]int
 	riderCounts               []RiderOrderCount
 	assignmentCount           uint64
-	distanceSumMeters         float64
+	distanceSumMicrometers    uint64
 	maxDistanceMeters         float64
 	distanceHistogram         []uint64
 	distanceHistogramOverflow uint64
@@ -69,6 +69,20 @@ func New(riders []model.Rider) (*Accumulator, error) {
 	return accumulator, nil
 }
 
+// Fork creates an empty worker-owned accumulator that shares only the
+// immutable UID-to-index map. Counts and distance metrics remain private.
+func (a *Accumulator) Fork() *Accumulator {
+	riderCounts := make([]RiderOrderCount, len(a.riderCounts))
+	for index, rider := range a.riderCounts {
+		riderCounts[index].RiderUID = rider.RiderUID
+	}
+	return &Accumulator{
+		riderIndex:        a.riderIndex,
+		riderCounts:       riderCounts,
+		distanceHistogram: make([]uint64, len(a.distanceHistogram)),
+	}
+}
+
 // Observe records one final assignment. It performs the only square root in
 // the matching/reporting path, after the winning rider has been selected.
 func (a *Accumulator) Observe(assignment model.Assignment) error {
@@ -81,9 +95,13 @@ func (a *Accumulator) Observe(assignment model.Assignment) error {
 	}
 
 	distanceMeters := math.Sqrt(assignment.DistanceSquaredMeters)
+	distanceMicrometers := math.Round(distanceMeters * 1_000_000)
+	if distanceMicrometers > float64(^uint64(0)-a.distanceSumMicrometers) {
+		return fmt.Errorf("assignment distance sum overflows uint64 micrometers")
+	}
 	a.riderCounts[index].OrderCount++
 	a.assignmentCount++
-	a.distanceSumMeters += distanceMeters
+	a.distanceSumMicrometers += uint64(distanceMicrometers)
 	if distanceMeters > a.maxDistanceMeters {
 		a.maxDistanceMeters = distanceMeters
 	}
@@ -93,6 +111,40 @@ func (a *Accumulator) Observe(assignment model.Assignment) error {
 		a.distanceHistogramOverflow++
 	} else {
 		a.distanceHistogram[bucket]++
+	}
+	return nil
+}
+
+// Merge combines a worker-owned accumulator into the receiver. Both
+// accumulators must have been created from the same ordered rider set. The
+// caller must not mutate source concurrently and should treat it as handed off
+// after this call.
+func (a *Accumulator) Merge(source *Accumulator) error {
+	if source == nil {
+		return errors.New("cannot merge a nil accumulator")
+	}
+	if len(a.riderCounts) != len(source.riderCounts) || len(a.distanceHistogram) != len(source.distanceHistogram) {
+		return errors.New("cannot merge accumulators with different shapes")
+	}
+	if source.distanceSumMicrometers > ^uint64(0)-a.distanceSumMicrometers {
+		return errors.New("cannot merge distance sums: uint64 micrometers overflow")
+	}
+	for index := range a.riderCounts {
+		if a.riderCounts[index].RiderUID != source.riderCounts[index].RiderUID {
+			return fmt.Errorf("cannot merge rider index %d: UID %d != %d", index, a.riderCounts[index].RiderUID, source.riderCounts[index].RiderUID)
+		}
+	}
+	for index := range a.riderCounts {
+		a.riderCounts[index].OrderCount += source.riderCounts[index].OrderCount
+	}
+	for index, count := range source.distanceHistogram {
+		a.distanceHistogram[index] += count
+	}
+	a.assignmentCount += source.assignmentCount
+	a.distanceSumMicrometers += source.distanceSumMicrometers
+	a.distanceHistogramOverflow += source.distanceHistogramOverflow
+	if source.maxDistanceMeters > a.maxDistanceMeters {
+		a.maxDistanceMeters = source.maxDistanceMeters
 	}
 	return nil
 }
@@ -128,7 +180,7 @@ func (a *Accumulator) Summary() Summary {
 	}
 	averageDistance := 0.0
 	if a.assignmentCount != 0 {
-		averageDistance = a.distanceSumMeters / float64(a.assignmentCount)
+		averageDistance = float64(a.distanceSumMicrometers) / 1_000_000 / float64(a.assignmentCount)
 	}
 
 	return Summary{

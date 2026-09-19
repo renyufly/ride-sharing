@@ -1,13 +1,15 @@
 // Command matcher is the standalone entry point for the matching exercise.
 //
-// Step five generates deterministic data and applies either exact serial
-// brute-force matching or exact serial KD-tree matching.
+// Step six runs exact nearest-rider matching through a bounded CSP pipeline.
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
+	"runtime"
 
 	"ride-sharing/internal/config"
 	"ride-sharing/internal/generator"
@@ -15,6 +17,7 @@ import (
 	"ride-sharing/internal/matcher/bruteforce"
 	"ride-sharing/internal/matcher/kdtree"
 	"ride-sharing/internal/model"
+	"ride-sharing/internal/pipeline"
 	"ride-sharing/internal/report"
 )
 
@@ -33,8 +36,13 @@ type dataOutput struct {
 	OrderSeed            int64              `json:"orderSeed"`
 	GeneratedRiderCount  int                `json:"generatedRiderCount"`
 	GeneratedOrderCount  int                `json:"generatedOrderCount"`
+	AdmittedOrderCount   int                `json:"admittedOrderCount"`
 	MatchedOrderCount    int                `json:"matchedOrderCount"`
+	UnfinishedOrderCount int                `json:"unfinishedOrderCount"`
 	LastPlannedArrivalNs int64              `json:"lastPlannedArrivalNs"`
+	MaxQueueDepth        int                `json:"maxQueueDepthBatches"`
+	WorkerCompleted      []uint64           `json:"workerCompletedOrders"`
+	GOMAXPROCS           int                `json:"gomaxprocs"`
 	RiderPreview         []riderOutput      `json:"riderPreview"`
 	OrderPreview         []orderOutput      `json:"orderPreview"`
 	AssignmentPreview    []assignmentOutput `json:"assignmentPreview"`
@@ -113,11 +121,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "create %s matcher: %v\n", cfg.Algorithm, err)
 		os.Exit(1)
 	}
-	reporter, err := report.New(riders)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "create assignment reporter: %v\n", err)
-		os.Exit(1)
-	}
 	stream, err := dataGenerator.NewOrderStream(cfg.OrderCount, cfg.ArrivalWindow, cfg.ArrivalModel, cfg.OrderDistribution)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create order stream: %v\n", err)
@@ -125,55 +128,30 @@ func main() {
 	}
 
 	const previewSize = 3
-	orderPreview := make([]orderOutput, 0, previewSize)
-	assignmentPreview := make([]assignmentOutput, 0, previewSize)
-	generatedOrders := 0
-	matchedOrders := 0
-	var lastPlannedArrival int64
-	for {
-		order, ok, err := stream.Next()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "generate order: %v\n", err)
-			os.Exit(1)
-		}
-		if !ok {
-			break
-		}
-		generatedOrders++
-		lastPlannedArrival = order.PlannedArrivalNs
-		assignment, err := selectedMatcher.Match(order)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "match order sequence %d: %v\n", order.Sequence, err)
-			os.Exit(1)
-		}
-		matchedOrders++
-		if err := reporter.Observe(assignment); err != nil {
-			fmt.Fprintf(os.Stderr, "record assignment for sequence %d: %v\n", order.Sequence, err)
-			os.Exit(1)
-		}
-		if len(orderPreview) < previewSize {
-			orderPreview = append(orderPreview, displayOrder(order))
-			assignmentPreview = append(assignmentPreview, displayAssignment(assignment))
-		}
+	runContext, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stopSignal()
+	if cfg.RunTimeout > 0 {
+		var cancelTimeout context.CancelFunc
+		runContext, cancelTimeout = context.WithTimeout(runContext, cfg.RunTimeout)
+		defer cancelTimeout()
+	}
+	pipelineResult, err := pipeline.Run(runContext, stream, selectedMatcher, riders, pipeline.Options{
+		Workers:         cfg.Workers,
+		BatchSize:       cfg.BatchSize,
+		ChannelCapacity: cfg.ChannelCapacity,
+		ExpectedOrders:  uint64(cfg.OrderCount),
+		PreviewSize:     previewSize,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
 	}
 
 	bounds := dataGenerator.Bounds()
 	seeds := dataGenerator.Seeds()
-	runReport := reporter.Summary()
-	if runReport.AssignmentCount != uint64(generatedOrders) || runReport.RiderOrderCountSum != uint64(matchedOrders) {
-		fmt.Fprintf(
-			os.Stderr,
-			"assignment conservation failed: generated=%d matched=%d assignments=%d riderCountSum=%d\n",
-			generatedOrders,
-			matchedOrders,
-			runReport.AssignmentCount,
-			runReport.RiderOrderCountSum,
-		)
-		os.Exit(1)
-	}
 	output := startupOutput{
-		Phase:   fmt.Sprintf("serial-%s-report", cfg.Algorithm),
-		Message: "all orders matched exactly and summarized; concurrency is not implemented in step five",
+		Phase:   fmt.Sprintf("csp-%s-report", cfg.Algorithm),
+		Message: "all orders matched exactly through the bounded CSP pipeline",
 		Config:  cfg.Display(),
 		Data: dataOutput{
 			Bounds: boundsOutput{
@@ -187,13 +165,18 @@ func main() {
 			RiderSeed:            seeds.Rider,
 			OrderSeed:            seeds.Order,
 			GeneratedRiderCount:  len(riders),
-			GeneratedOrderCount:  generatedOrders,
-			MatchedOrderCount:    matchedOrders,
-			LastPlannedArrivalNs: lastPlannedArrival,
+			GeneratedOrderCount:  int(pipelineResult.GeneratedOrders),
+			AdmittedOrderCount:   int(pipelineResult.AdmittedOrders),
+			MatchedOrderCount:    int(pipelineResult.CompletedOrders),
+			UnfinishedOrderCount: int(pipelineResult.UnfinishedOrders),
+			LastPlannedArrivalNs: pipelineResult.LastPlannedArrivalNs,
+			MaxQueueDepth:        pipelineResult.MaxQueueDepth,
+			WorkerCompleted:      pipelineResult.WorkerCompleted,
+			GOMAXPROCS:           runtime.GOMAXPROCS(0),
 			RiderPreview:         displayRiders(riders, previewSize),
-			OrderPreview:         orderPreview,
-			AssignmentPreview:    assignmentPreview,
-			Report:               runReport,
+			OrderPreview:         displayOrders(pipelineResult.OrderPreview),
+			AssignmentPreview:    displayAssignments(pipelineResult.AssignmentPreview),
+			Report:               pipelineResult.Report,
 		},
 	}
 
@@ -230,6 +213,14 @@ func displayOrder(order model.Order) orderOutput {
 	}
 }
 
+func displayOrders(orders []model.Order) []orderOutput {
+	result := make([]orderOutput, len(orders))
+	for index, order := range orders {
+		result[index] = displayOrder(order)
+	}
+	return result
+}
+
 func displayAssignment(assignment model.Assignment) assignmentOutput {
 	return assignmentOutput{
 		OrderID:               assignment.OrderID,
@@ -237,6 +228,14 @@ func displayAssignment(assignment model.Assignment) assignmentOutput {
 		RiderUID:              assignment.RiderUID,
 		DistanceSquaredMeters: assignment.DistanceSquaredMeters,
 	}
+}
+
+func displayAssignments(assignments []model.Assignment) []assignmentOutput {
+	result := make([]assignmentOutput, len(assignments))
+	for index, assignment := range assignments {
+		result[index] = displayAssignment(assignment)
+	}
+	return result
 }
 
 func displayGeoPoint(point model.GeoPoint) geoPointOutput {

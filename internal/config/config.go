@@ -31,6 +31,7 @@ type Config struct {
 	RiderCount             int
 	OrderCount             int
 	ArrivalWindow          time.Duration
+	RunTimeout             time.Duration
 	ArrivalModel           generator.ArrivalModel
 	Seed                   int64
 	RiderDistribution      generator.SpatialDistribution
@@ -51,6 +52,7 @@ type DisplayConfig struct {
 	RiderCount             int     `json:"riderCount"`
 	OrderCount             int     `json:"orderCount"`
 	ArrivalWindow          string  `json:"arrivalWindow"`
+	RunTimeout             string  `json:"runTimeout"`
 	ArrivalModel           string  `json:"arrivalModel"`
 	Seed                   int64   `json:"seed"`
 	RiderDistribution      string  `json:"riderDistribution"`
@@ -69,14 +71,15 @@ func Default() Config {
 		RiderCount:        100,
 		OrderCount:        10_000,
 		ArrivalWindow:     30 * time.Second,
+		RunTimeout:        0,
 		ArrivalModel:      generator.ArrivalUniformWindow,
 		Seed:              42,
 		RiderDistribution: generator.DistributionUniform,
 		OrderDistribution: generator.DistributionUniform,
-		Algorithm:         AlgorithmBruteForce,
-		Workers:           1,
-		BatchSize:         128,
-		ChannelCapacity:   8,
+		Algorithm:         AlgorithmKDTree,
+		Workers:           2,
+		BatchSize:         256,
+		ChannelCapacity:   16,
 		Strategy:          StrategyNearest,
 	}
 }
@@ -96,6 +99,7 @@ func Parse(args []string) (Config, error) {
 	flags.IntVar(&cfg.RiderCount, "riders", cfg.RiderCount, "number of riders")
 	flags.IntVar(&cfg.OrderCount, "orders", cfg.OrderCount, "number of orders")
 	flags.DurationVar(&cfg.ArrivalWindow, "arrival-window", cfg.ArrivalWindow, "order arrival window")
+	flags.DurationVar(&cfg.RunTimeout, "timeout", cfg.RunTimeout, "whole-run timeout; zero disables the deadline")
 	flags.StringVar(&arrivalModel, "arrival-model", arrivalModel, "arrival model: uniform-window, front-loaded-burst, or unbounded")
 	flags.Int64Var(&cfg.Seed, "seed", cfg.Seed, "deterministic random seed")
 	flags.StringVar(&riderDistribution, "rider-distribution", riderDistribution, "rider distribution: uniform, hotspot, or skewed")
@@ -135,6 +139,9 @@ func (c Config) Validate() error {
 	if c.ArrivalWindow < 0 {
 		errs = append(errs, errors.New("arrival window cannot be negative"))
 	}
+	if c.RunTimeout < 0 {
+		errs = append(errs, errors.New("run timeout cannot be negative"))
+	}
 	if err := generator.ValidateArrivalModel(c.ArrivalModel); err != nil {
 		errs = append(errs, err)
 	}
@@ -170,6 +177,7 @@ func (c Config) Display() DisplayConfig {
 		RiderCount:             c.RiderCount,
 		OrderCount:             c.OrderCount,
 		ArrivalWindow:          c.ArrivalWindow.String(),
+		RunTimeout:             c.RunTimeout.String(),
 		ArrivalModel:           string(c.ArrivalModel),
 		Seed:                   c.Seed,
 		RiderDistribution:      string(c.RiderDistribution),
