@@ -27,3 +27,12 @@ type Order struct {
 	Pickup           GeoPoint
 	Point            Point2D
 }
+
+// Assignment is the result of matching one order. The squared distance is
+// retained because nearest-neighbor comparison does not require a square root.
+type Assignment struct {
+	OrderID               uint64
+	Sequence              uint64
+	RiderUID              uint64
+	DistanceSquaredMeters float64
+}

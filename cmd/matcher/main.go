@@ -1,7 +1,7 @@
 // Command matcher is the standalone entry point for the matching exercise.
 //
-// Step two generates deterministic rider and order data. Matching is
-// deliberately not started until the baseline matcher is implemented later.
+// Step three generates deterministic data and applies the serial brute-force
+// nearest-rider baseline.
 package main
 
 import (
@@ -12,6 +12,7 @@ import (
 	"ride-sharing/internal/config"
 	"ride-sharing/internal/generator"
 	"ride-sharing/internal/geo"
+	"ride-sharing/internal/matcher/bruteforce"
 	"ride-sharing/internal/model"
 )
 
@@ -23,16 +24,18 @@ type startupOutput struct {
 }
 
 type dataOutput struct {
-	Bounds               boundsOutput   `json:"bounds"`
-	ProjectionOrigin     geoPointOutput `json:"projectionOrigin"`
-	EarthRadiusMeters    float64        `json:"earthRadiusMeters"`
-	RiderSeed            int64          `json:"riderSeed"`
-	OrderSeed            int64          `json:"orderSeed"`
-	GeneratedRiderCount  int            `json:"generatedRiderCount"`
-	GeneratedOrderCount  int            `json:"generatedOrderCount"`
-	LastPlannedArrivalNs int64          `json:"lastPlannedArrivalNs"`
-	RiderPreview         []riderOutput  `json:"riderPreview"`
-	OrderPreview         []orderOutput  `json:"orderPreview"`
+	Bounds               boundsOutput       `json:"bounds"`
+	ProjectionOrigin     geoPointOutput     `json:"projectionOrigin"`
+	EarthRadiusMeters    float64            `json:"earthRadiusMeters"`
+	RiderSeed            int64              `json:"riderSeed"`
+	OrderSeed            int64              `json:"orderSeed"`
+	GeneratedRiderCount  int                `json:"generatedRiderCount"`
+	GeneratedOrderCount  int                `json:"generatedOrderCount"`
+	MatchedOrderCount    int                `json:"matchedOrderCount"`
+	LastPlannedArrivalNs int64              `json:"lastPlannedArrivalNs"`
+	RiderPreview         []riderOutput      `json:"riderPreview"`
+	OrderPreview         []orderOutput      `json:"orderPreview"`
+	AssignmentPreview    []assignmentOutput `json:"assignmentPreview"`
 }
 
 type boundsOutput struct {
@@ -66,6 +69,13 @@ type orderOutput struct {
 	Point            pointOutput    `json:"point"`
 }
 
+type assignmentOutput struct {
+	OrderID               uint64  `json:"orderId"`
+	Sequence              uint64  `json:"sequence"`
+	RiderUID              uint64  `json:"riderUid"`
+	DistanceSquaredMeters float64 `json:"distanceSquaredMeters"`
+}
+
 func main() {
 	cfg, err := config.Parse(os.Args[1:])
 	if err != nil {
@@ -83,6 +93,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "generate riders: %v\n", err)
 		os.Exit(1)
 	}
+	if cfg.Algorithm != config.AlgorithmBruteForce {
+		fmt.Fprintf(os.Stderr, "algorithm %q is not implemented in step three\n", cfg.Algorithm)
+		os.Exit(2)
+	}
+	nearestMatcher, err := bruteforce.New(riders)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create brute-force matcher: %v\n", err)
+		os.Exit(1)
+	}
 	stream, err := dataGenerator.NewOrderStream(cfg.OrderCount, cfg.ArrivalWindow, cfg.ArrivalModel, cfg.OrderDistribution)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create order stream: %v\n", err)
@@ -91,7 +110,9 @@ func main() {
 
 	const previewSize = 3
 	orderPreview := make([]orderOutput, 0, previewSize)
+	assignmentPreview := make([]assignmentOutput, 0, previewSize)
 	generatedOrders := 0
+	matchedOrders := 0
 	var lastPlannedArrival int64
 	for {
 		order, ok, err := stream.Next()
@@ -104,16 +125,23 @@ func main() {
 		}
 		generatedOrders++
 		lastPlannedArrival = order.PlannedArrivalNs
+		assignment, err := nearestMatcher.Match(order)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "match order sequence %d: %v\n", order.Sequence, err)
+			os.Exit(1)
+		}
+		matchedOrders++
 		if len(orderPreview) < previewSize {
 			orderPreview = append(orderPreview, displayOrder(order))
+			assignmentPreview = append(assignmentPreview, displayAssignment(assignment))
 		}
 	}
 
 	bounds := dataGenerator.Bounds()
 	seeds := dataGenerator.Seeds()
 	output := startupOutput{
-		Phase:   "data-generation",
-		Message: "deterministic data generated; matching is not implemented in step two",
+		Phase:   "serial-brute-force",
+		Message: "all orders matched by exact projected distance; assignment statistics are not implemented in step three",
 		Config:  cfg.Display(),
 		Data: dataOutput{
 			Bounds: boundsOutput{
@@ -128,9 +156,11 @@ func main() {
 			OrderSeed:            seeds.Order,
 			GeneratedRiderCount:  len(riders),
 			GeneratedOrderCount:  generatedOrders,
+			MatchedOrderCount:    matchedOrders,
 			LastPlannedArrivalNs: lastPlannedArrival,
 			RiderPreview:         displayRiders(riders, previewSize),
 			OrderPreview:         orderPreview,
+			AssignmentPreview:    assignmentPreview,
 		},
 	}
 
@@ -164,6 +194,15 @@ func displayOrder(order model.Order) orderOutput {
 		PlannedArrivalNs: order.PlannedArrivalNs,
 		Pickup:           displayGeoPoint(order.Pickup),
 		Point:            displayPoint(order.Point),
+	}
+}
+
+func displayAssignment(assignment model.Assignment) assignmentOutput {
+	return assignmentOutput{
+		OrderID:               assignment.OrderID,
+		Sequence:              assignment.Sequence,
+		RiderUID:              assignment.RiderUID,
+		DistanceSquaredMeters: assignment.DistanceSquaredMeters,
 	}
 }
 
