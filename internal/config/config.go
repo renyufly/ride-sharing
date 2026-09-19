@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"time"
+
+	"ride-sharing/internal/generator"
 )
 
 type Algorithm string
@@ -29,7 +31,10 @@ type Config struct {
 	RiderCount             int
 	OrderCount             int
 	ArrivalWindow          time.Duration
+	ArrivalModel           generator.ArrivalModel
 	Seed                   int64
+	RiderDistribution      generator.SpatialDistribution
+	OrderDistribution      generator.SpatialDistribution
 	Algorithm              Algorithm
 	Workers                int
 	BatchSize              int
@@ -46,7 +51,10 @@ type DisplayConfig struct {
 	RiderCount             int     `json:"riderCount"`
 	OrderCount             int     `json:"orderCount"`
 	ArrivalWindow          string  `json:"arrivalWindow"`
+	ArrivalModel           string  `json:"arrivalModel"`
 	Seed                   int64   `json:"seed"`
+	RiderDistribution      string  `json:"riderDistribution"`
+	OrderDistribution      string  `json:"orderDistribution"`
 	Algorithm              string  `json:"algorithm"`
 	Workers                int     `json:"workers"`
 	BatchSize              int     `json:"batchSize"`
@@ -58,15 +66,18 @@ type DisplayConfig struct {
 
 func Default() Config {
 	return Config{
-		RiderCount:      100,
-		OrderCount:      10_000,
-		ArrivalWindow:   30 * time.Second,
-		Seed:            42,
-		Algorithm:       AlgorithmBruteForce,
-		Workers:         1,
-		BatchSize:       128,
-		ChannelCapacity: 8,
-		Strategy:        StrategyNearest,
+		RiderCount:        100,
+		OrderCount:        10_000,
+		ArrivalWindow:     30 * time.Second,
+		ArrivalModel:      generator.ArrivalUniformWindow,
+		Seed:              42,
+		RiderDistribution: generator.DistributionUniform,
+		OrderDistribution: generator.DistributionUniform,
+		Algorithm:         AlgorithmBruteForce,
+		Workers:           1,
+		BatchSize:         128,
+		ChannelCapacity:   8,
+		Strategy:          StrategyNearest,
 	}
 }
 
@@ -78,11 +89,17 @@ func Parse(args []string) (Config, error) {
 	flags.SetOutput(io.Discard)
 
 	algorithm := string(cfg.Algorithm)
+	arrivalModel := string(cfg.ArrivalModel)
+	riderDistribution := string(cfg.RiderDistribution)
+	orderDistribution := string(cfg.OrderDistribution)
 	strategy := string(cfg.Strategy)
 	flags.IntVar(&cfg.RiderCount, "riders", cfg.RiderCount, "number of riders")
 	flags.IntVar(&cfg.OrderCount, "orders", cfg.OrderCount, "number of orders")
 	flags.DurationVar(&cfg.ArrivalWindow, "arrival-window", cfg.ArrivalWindow, "order arrival window")
+	flags.StringVar(&arrivalModel, "arrival-model", arrivalModel, "arrival model: uniform-window, front-loaded-burst, or unbounded")
 	flags.Int64Var(&cfg.Seed, "seed", cfg.Seed, "deterministic random seed")
+	flags.StringVar(&riderDistribution, "rider-distribution", riderDistribution, "rider distribution: uniform, hotspot, or skewed")
+	flags.StringVar(&orderDistribution, "order-distribution", orderDistribution, "order distribution: uniform, hotspot, or skewed")
 	flags.StringVar(&algorithm, "algorithm", algorithm, "matching algorithm: brute-force or kd-tree")
 	flags.IntVar(&cfg.Workers, "workers", cfg.Workers, "matching worker count")
 	flags.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "orders per batch")
@@ -97,6 +114,9 @@ func Parse(args []string) (Config, error) {
 	}
 
 	cfg.Algorithm = Algorithm(algorithm)
+	cfg.ArrivalModel = generator.ArrivalModel(arrivalModel)
+	cfg.RiderDistribution = generator.SpatialDistribution(riderDistribution)
+	cfg.OrderDistribution = generator.SpatialDistribution(orderDistribution)
 	cfg.Strategy = Strategy(strategy)
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -114,6 +134,15 @@ func (c Config) Validate() error {
 	}
 	if c.ArrivalWindow < 0 {
 		errs = append(errs, errors.New("arrival window cannot be negative"))
+	}
+	if err := generator.ValidateArrivalModel(c.ArrivalModel); err != nil {
+		errs = append(errs, err)
+	}
+	if err := generator.ValidateSpatialDistribution(c.RiderDistribution); err != nil {
+		errs = append(errs, fmt.Errorf("rider distribution: %w", err))
+	}
+	if err := generator.ValidateSpatialDistribution(c.OrderDistribution); err != nil {
+		errs = append(errs, fmt.Errorf("order distribution: %w", err))
 	}
 	if c.Algorithm != AlgorithmBruteForce && c.Algorithm != AlgorithmKDTree {
 		errs = append(errs, fmt.Errorf("unsupported algorithm %q", c.Algorithm))
@@ -141,7 +170,10 @@ func (c Config) Display() DisplayConfig {
 		RiderCount:             c.RiderCount,
 		OrderCount:             c.OrderCount,
 		ArrivalWindow:          c.ArrivalWindow.String(),
+		ArrivalModel:           string(c.ArrivalModel),
 		Seed:                   c.Seed,
+		RiderDistribution:      string(c.RiderDistribution),
+		OrderDistribution:      string(c.OrderDistribution),
 		Algorithm:              string(c.Algorithm),
 		Workers:                c.Workers,
 		BatchSize:              c.BatchSize,
