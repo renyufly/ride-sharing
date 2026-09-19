@@ -14,6 +14,7 @@ import (
 	"ride-sharing/internal/geo"
 	"ride-sharing/internal/matcher/bruteforce"
 	"ride-sharing/internal/model"
+	"ride-sharing/internal/report"
 )
 
 type startupOutput struct {
@@ -36,6 +37,7 @@ type dataOutput struct {
 	RiderPreview         []riderOutput      `json:"riderPreview"`
 	OrderPreview         []orderOutput      `json:"orderPreview"`
 	AssignmentPreview    []assignmentOutput `json:"assignmentPreview"`
+	Report               report.Summary     `json:"report"`
 }
 
 type boundsOutput struct {
@@ -102,6 +104,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "create brute-force matcher: %v\n", err)
 		os.Exit(1)
 	}
+	reporter, err := report.New(riders)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create assignment reporter: %v\n", err)
+		os.Exit(1)
+	}
 	stream, err := dataGenerator.NewOrderStream(cfg.OrderCount, cfg.ArrivalWindow, cfg.ArrivalModel, cfg.OrderDistribution)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create order stream: %v\n", err)
@@ -131,6 +138,10 @@ func main() {
 			os.Exit(1)
 		}
 		matchedOrders++
+		if err := reporter.Observe(assignment); err != nil {
+			fmt.Fprintf(os.Stderr, "record assignment for sequence %d: %v\n", order.Sequence, err)
+			os.Exit(1)
+		}
 		if len(orderPreview) < previewSize {
 			orderPreview = append(orderPreview, displayOrder(order))
 			assignmentPreview = append(assignmentPreview, displayAssignment(assignment))
@@ -139,9 +150,21 @@ func main() {
 
 	bounds := dataGenerator.Bounds()
 	seeds := dataGenerator.Seeds()
+	runReport := reporter.Summary()
+	if runReport.AssignmentCount != uint64(generatedOrders) || runReport.RiderOrderCountSum != uint64(matchedOrders) {
+		fmt.Fprintf(
+			os.Stderr,
+			"assignment conservation failed: generated=%d matched=%d assignments=%d riderCountSum=%d\n",
+			generatedOrders,
+			matchedOrders,
+			runReport.AssignmentCount,
+			runReport.RiderOrderCountSum,
+		)
+		os.Exit(1)
+	}
 	output := startupOutput{
-		Phase:   "serial-brute-force",
-		Message: "all orders matched by exact projected distance; assignment statistics are not implemented in step three",
+		Phase:   "serial-brute-force-report",
+		Message: "all orders matched and summarized; KD-tree and concurrency are not implemented in step four",
 		Config:  cfg.Display(),
 		Data: dataOutput{
 			Bounds: boundsOutput{
@@ -161,6 +184,7 @@ func main() {
 			RiderPreview:         displayRiders(riders, previewSize),
 			OrderPreview:         orderPreview,
 			AssignmentPreview:    assignmentPreview,
+			Report:               runReport,
 		},
 	}
 
