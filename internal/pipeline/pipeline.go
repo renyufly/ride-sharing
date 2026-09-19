@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ride-sharing/internal/model"
@@ -57,10 +59,24 @@ type Result struct {
 	UnfinishedOrders     uint64             `json:"unfinishedOrders"`
 	LastPlannedArrivalNs int64              `json:"lastPlannedArrivalNs"`
 	MaxQueueDepth        int                `json:"maxQueueDepthBatches"`
+	Performance          PerformanceMetrics `json:"performance"`
 	WorkerCompleted      []uint64           `json:"workerCompletedOrders"`
 	OrderPreview         []model.Order      `json:"-"`
 	AssignmentPreview    []model.Assignment `json:"-"`
 	Report               report.Summary     `json:"report"`
+}
+
+type PerformanceMetrics struct {
+	PlannedArrivalWindowNs int64          `json:"plannedArrivalWindowNs"`
+	ActualInjectionNs      int64          `json:"actualInjectionNs"`
+	InjectionOverrunNs     int64          `json:"injectionOverrunNs"`
+	DrainAfterWindowNs     int64          `json:"drainAfterWindowNs"`
+	TotalRunNs             int64          `json:"totalRunNs"`
+	ActualAdmissionRate    float64        `json:"actualAdmissionRatePerSecond"`
+	ActualCompletionRate   float64        `json:"actualCompletionRatePerSecond"`
+	AdmissionDelay         LatencySummary `json:"admissionDelay"`
+	QueueAndMatchLatency   LatencySummary `json:"queueAndMatchLatency"`
+	EndToEndLatency        LatencySummary `json:"endToEndLatency"`
 }
 
 type RunError struct {
@@ -117,16 +133,26 @@ type producerResult struct {
 	admitted             uint64
 	lastPlannedArrivalNs int64
 	maxQueueDepth        int
+	lastAdmissionNs      int64
+	admissionLatency     latencyHistogram
 	preview              []model.Order
 	err                  error
 }
 
 type workerResult struct {
-	workerID  int
-	completed uint64
-	preview   []model.Assignment
-	reporter  *report.Accumulator
-	err       error
+	workerID             int
+	completed            uint64
+	preview              []model.Assignment
+	reporter             *report.Accumulator
+	lastCompletionNs     int64
+	queueAndMatchLatency latencyHistogram
+	endToEndLatency      latencyHistogram
+	err                  error
+}
+
+type admittedBatch struct {
+	orders     []model.Order
+	admittedNs atomic.Int64
 }
 
 func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []model.Rider, options Options) (Result, error) {
@@ -154,22 +180,23 @@ func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []mode
 
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
-	batchChannel := make(chan []model.Order, options.ChannelCapacity)
-	bufferPool := make(chan []model.Order, options.ChannelCapacity+options.Workers)
+	runStarted := time.Now()
+	batchChannel := make(chan *admittedBatch, options.ChannelCapacity)
+	bufferPool := make(chan *admittedBatch, options.ChannelCapacity+options.Workers)
 	for range cap(bufferPool) {
-		bufferPool <- make([]model.Order, 0, options.BatchSize)
+		bufferPool <- &admittedBatch{orders: make([]model.Order, 0, options.BatchSize)}
 	}
 	producerResults := make(chan producerResult, 1)
 	workerResults := make(chan workerResult, options.Workers)
 
-	go produce(runContext, cancel, source, batchChannel, bufferPool, options, producerResults)
+	go produce(runContext, cancel, runStarted, source, batchChannel, bufferPool, options, producerResults)
 
 	var workers sync.WaitGroup
 	workers.Add(options.Workers)
 	for workerID := 0; workerID < options.Workers; workerID++ {
 		go func() {
 			defer workers.Done()
-			work(runContext, cancel, workerID, matcher, batchChannel, bufferPool, workerReporters[workerID], options.PreviewSize, workerResults)
+			work(runContext, cancel, runStarted, workerID, matcher, batchChannel, bufferPool, workerReporters[workerID], options.PreviewSize, workerResults)
 		}()
 	}
 
@@ -193,11 +220,19 @@ func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []mode
 		WorkerCompleted:      make([]uint64, options.Workers),
 		OrderPreview:         append([]model.Order(nil), producerState.preview...),
 	}
+	queueAndMatchLatency := latencyHistogram{}
+	endToEndLatency := latencyHistogram{}
+	lastCompletionNs := int64(0)
 	var workerError error
 	for _, state := range states {
 		result.CompletedOrders += state.completed
 		result.WorkerCompleted[state.workerID] = state.completed
 		result.AssignmentPreview = append(result.AssignmentPreview, state.preview...)
+		queueAndMatchLatency.merge(&state.queueAndMatchLatency)
+		endToEndLatency.merge(&state.endToEndLatency)
+		if state.lastCompletionNs > lastCompletionNs {
+			lastCompletionNs = state.lastCompletionNs
+		}
 		if err := mergedReporter.Merge(state.reporter); err != nil && workerError == nil {
 			workerError = fmt.Errorf("merge worker %d report: %w", state.workerID, err)
 		}
@@ -213,6 +248,7 @@ func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []mode
 	})
 	result.Report = mergedReporter.Summary()
 	result.UnfinishedOrders = unfinished(options.ExpectedOrders, result.CompletedOrders)
+	result.Performance = buildPerformanceMetrics(producerState, lastCompletionNs, queueAndMatchLatency, endToEndLatency)
 
 	cause := workerError
 	if cause == nil {
@@ -240,38 +276,44 @@ func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []mode
 func produce(
 	ctx context.Context,
 	cancel context.CancelFunc,
+	start time.Time,
 	source OrderSource,
-	batches chan<- []model.Order,
-	pool chan []model.Order,
+	batches chan<- *admittedBatch,
+	pool chan *admittedBatch,
 	options Options,
 	results chan<- producerResult,
 ) {
 	state := producerResult{preview: make([]model.Order, 0, options.PreviewSize)}
-	var ownedBatch []model.Order
+	var ownedBatch *admittedBatch
+	arrivalTimer := time.NewTimer(time.Hour)
+	if !arrivalTimer.Stop() {
+		<-arrivalTimer.C
+	}
 	defer func() {
+		arrivalTimer.Stop()
 		if recovered := recover(); recovered != nil {
 			state.err = &producerPanicError{Recovered: recovered, Stack: string(debug.Stack())}
 			cancel()
 		}
 		if ownedBatch != nil {
-			recycleBuffer(pool, ownedBatch)
+			recycleBatch(pool, ownedBatch)
 		}
 		close(batches)
 		results <- state
 	}()
 
-	start := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			state.err = ctx.Err()
 			return
 		case ownedBatch = <-pool:
-			ownedBatch = ownedBatch[:0]
+			ownedBatch.orders = ownedBatch.orders[:0]
+			ownedBatch.admittedNs.Store(0)
 		}
 
 		sourceEnded := false
-		for len(ownedBatch) < options.BatchSize {
+		for len(ownedBatch.orders) < options.BatchSize {
 			order, ok, err := source.Next()
 			if err != nil {
 				state.err = fmt.Errorf("generate order: %w", err)
@@ -287,19 +329,25 @@ func produce(
 			if uint64(len(state.preview)) < uint64(options.PreviewSize) {
 				state.preview = append(state.preview, order)
 			}
-			if err := waitForPlannedArrival(ctx, start, order.PlannedArrivalNs); err != nil {
+			if err := waitForPlannedArrival(ctx, start, order.PlannedArrivalNs, arrivalTimer); err != nil {
 				state.err = err
 				return
 			}
-			ownedBatch = append(ownedBatch, order)
+			ownedBatch.orders = append(ownedBatch.orders, order)
 		}
 
-		if len(ownedBatch) != 0 {
-			batchSize := len(ownedBatch)
+		if len(ownedBatch.orders) != 0 {
+			batchSize := len(ownedBatch.orders)
 			select {
 			case batches <- ownedBatch:
+				admittedNs := time.Since(start).Nanoseconds()
+				ownedBatch.admittedNs.Store(admittedNs + 1)
+				for _, order := range ownedBatch.orders {
+					state.admissionLatency.observe(admittedNs - order.PlannedArrivalNs)
+				}
 				ownedBatch = nil
 				state.admitted += uint64(batchSize)
+				state.lastAdmissionNs = admittedNs
 				if queueDepth := len(batches); queueDepth > state.maxQueueDepth {
 					state.maxQueueDepth = queueDepth
 				}
@@ -317,10 +365,11 @@ func produce(
 func work(
 	ctx context.Context,
 	cancel context.CancelFunc,
+	start time.Time,
 	workerID int,
 	matcher Matcher,
-	batches <-chan []model.Order,
-	pool chan []model.Order,
+	batches <-chan *admittedBatch,
+	pool chan *admittedBatch,
 	reporter *report.Accumulator,
 	previewSize int,
 	results chan<- workerResult,
@@ -332,7 +381,8 @@ func work(
 	}
 	var currentOrder model.Order
 	var hasCurrentOrder bool
-	var ownedBatch []model.Order
+	var ownedBatch *admittedBatch
+	var admittedNs int64
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			panicError := &PanicError{
@@ -350,7 +400,7 @@ func work(
 			cancel()
 		}
 		if ownedBatch != nil {
-			recycleBuffer(pool, ownedBatch)
+			recycleBatch(pool, ownedBatch)
 		}
 		results <- state
 	}()
@@ -364,15 +414,19 @@ func work(
 				return
 			}
 			ownedBatch = batch
+			for admittedNs = batch.admittedNs.Load(); admittedNs == 0; admittedNs = batch.admittedNs.Load() {
+				runtime.Gosched()
+			}
+			admittedNs--
 		}
 
-		for index := range ownedBatch {
+		for index := range ownedBatch.orders {
 			select {
 			case <-ctx.Done():
 				return
 			default:
 			}
-			currentOrder = ownedBatch[index]
+			currentOrder = ownedBatch.orders[index]
 			hasCurrentOrder = true
 			assignment, err := matcher.Match(currentOrder)
 			if err != nil {
@@ -398,17 +452,54 @@ func work(
 				return
 			}
 			state.completed++
+			completedAt := time.Now()
+			state.lastCompletionNs = completedAt.Sub(start).Nanoseconds()
+			state.queueAndMatchLatency.observe(state.lastCompletionNs - admittedNs)
+			state.endToEndLatency.observe(completedAt.Sub(start.Add(time.Duration(currentOrder.PlannedArrivalNs))).Nanoseconds())
 			if assignment.Sequence < uint64(previewSize) {
 				state.preview = append(state.preview, assignment)
 			}
 			hasCurrentOrder = false
 		}
-		recycleBuffer(pool, ownedBatch)
+		recycleBatch(pool, ownedBatch)
 		ownedBatch = nil
 	}
 }
 
-func waitForPlannedArrival(ctx context.Context, start time.Time, plannedArrivalNs int64) error {
+func buildPerformanceMetrics(
+	producer producerResult,
+	lastCompletionNs int64,
+	queueAndMatchLatency latencyHistogram,
+	endToEndLatency latencyHistogram,
+) PerformanceMetrics {
+	injectionOverrunNs := producer.lastAdmissionNs - producer.lastPlannedArrivalNs
+	if injectionOverrunNs < 0 {
+		injectionOverrunNs = 0
+	}
+	drainAfterWindowNs := lastCompletionNs - producer.lastPlannedArrivalNs
+	if drainAfterWindowNs < 0 {
+		drainAfterWindowNs = 0
+	}
+	metrics := PerformanceMetrics{
+		PlannedArrivalWindowNs: producer.lastPlannedArrivalNs,
+		ActualInjectionNs:      producer.lastAdmissionNs,
+		InjectionOverrunNs:     injectionOverrunNs,
+		DrainAfterWindowNs:     drainAfterWindowNs,
+		TotalRunNs:             lastCompletionNs,
+		AdmissionDelay:         producer.admissionLatency.summary(),
+		QueueAndMatchLatency:   queueAndMatchLatency.summary(),
+		EndToEndLatency:        endToEndLatency.summary(),
+	}
+	if producer.lastAdmissionNs > 0 {
+		metrics.ActualAdmissionRate = float64(producer.admitted) / (float64(producer.lastAdmissionNs) / float64(time.Second))
+	}
+	if lastCompletionNs > 0 {
+		metrics.ActualCompletionRate = float64(endToEndLatency.count) / (float64(lastCompletionNs) / float64(time.Second))
+	}
+	return metrics
+}
+
+func waitForPlannedArrival(ctx context.Context, start time.Time, plannedArrivalNs int64, timer *time.Timer) error {
 	if plannedArrivalNs <= 0 {
 		return nil
 	}
@@ -416,19 +507,24 @@ func waitForPlannedArrival(ctx context.Context, start time.Time, plannedArrivalN
 	if wait <= 0 {
 		return nil
 	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
+	timer.Reset(wait)
 	select {
 	case <-timer.C:
 		return nil
 	case <-ctx.Done():
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
 		return ctx.Err()
 	}
 }
 
-func recycleBuffer(pool chan []model.Order, batch []model.Order) {
+func recycleBatch(pool chan *admittedBatch, batch *admittedBatch) {
 	select {
-	case pool <- batch[:0]:
+	case pool <- batch:
 	default:
 	}
 }

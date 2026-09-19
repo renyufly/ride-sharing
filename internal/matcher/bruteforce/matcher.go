@@ -4,6 +4,7 @@ package bruteforce
 import (
 	"errors"
 	"fmt"
+	"unsafe"
 
 	matchrule "ride-sharing/internal/matcher"
 	"ride-sharing/internal/model"
@@ -11,6 +12,16 @@ import (
 
 type Matcher struct {
 	riders []model.Rider
+}
+
+func (m Matcher) IndexStats() matchrule.IndexStats {
+	entrySize := uint64(unsafe.Sizeof(model.Rider{}))
+	return matchrule.IndexStats{
+		Kind:           "rider-slice",
+		EntryCount:     len(m.riders),
+		EntrySizeBytes: entrySize,
+		EstimatedBytes: uint64(len(m.riders)) * entrySize,
+	}
 }
 
 // New validates and copies the static rider set. Copying prevents a caller

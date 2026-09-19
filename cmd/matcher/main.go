@@ -10,15 +10,18 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"time"
 
 	"ride-sharing/internal/config"
 	"ride-sharing/internal/generator"
 	"ride-sharing/internal/geo"
+	matchrule "ride-sharing/internal/matcher"
 	"ride-sharing/internal/matcher/bruteforce"
 	"ride-sharing/internal/matcher/kdtree"
 	"ride-sharing/internal/model"
 	"ride-sharing/internal/pipeline"
 	"ride-sharing/internal/report"
+	"ride-sharing/internal/resource"
 )
 
 type startupOutput struct {
@@ -29,24 +32,29 @@ type startupOutput struct {
 }
 
 type dataOutput struct {
-	Bounds               boundsOutput       `json:"bounds"`
-	ProjectionOrigin     geoPointOutput     `json:"projectionOrigin"`
-	EarthRadiusMeters    float64            `json:"earthRadiusMeters"`
-	RiderSeed            int64              `json:"riderSeed"`
-	OrderSeed            int64              `json:"orderSeed"`
-	GeneratedRiderCount  int                `json:"generatedRiderCount"`
-	GeneratedOrderCount  int                `json:"generatedOrderCount"`
-	AdmittedOrderCount   int                `json:"admittedOrderCount"`
-	MatchedOrderCount    int                `json:"matchedOrderCount"`
-	UnfinishedOrderCount int                `json:"unfinishedOrderCount"`
-	LastPlannedArrivalNs int64              `json:"lastPlannedArrivalNs"`
-	MaxQueueDepth        int                `json:"maxQueueDepthBatches"`
-	WorkerCompleted      []uint64           `json:"workerCompletedOrders"`
-	GOMAXPROCS           int                `json:"gomaxprocs"`
-	RiderPreview         []riderOutput      `json:"riderPreview"`
-	OrderPreview         []orderOutput      `json:"orderPreview"`
-	AssignmentPreview    []assignmentOutput `json:"assignmentPreview"`
-	Report               report.Summary     `json:"report"`
+	Bounds               boundsOutput                `json:"bounds"`
+	ProjectionOrigin     geoPointOutput              `json:"projectionOrigin"`
+	EarthRadiusMeters    float64                     `json:"earthRadiusMeters"`
+	RiderSeed            int64                       `json:"riderSeed"`
+	OrderSeed            int64                       `json:"orderSeed"`
+	GeneratedRiderCount  int                         `json:"generatedRiderCount"`
+	GeneratedOrderCount  int                         `json:"generatedOrderCount"`
+	AdmittedOrderCount   int                         `json:"admittedOrderCount"`
+	MatchedOrderCount    int                         `json:"matchedOrderCount"`
+	UnfinishedOrderCount int                         `json:"unfinishedOrderCount"`
+	LastPlannedArrivalNs int64                       `json:"lastPlannedArrivalNs"`
+	MaxQueueDepth        int                         `json:"maxQueueDepthBatches"`
+	WorkerCompleted      []uint64                    `json:"workerCompletedOrders"`
+	GOMAXPROCS           int                         `json:"gomaxprocs"`
+	MemoryEstimate       pipeline.MemoryEstimate     `json:"memoryEstimate"`
+	Index                matchrule.IndexStats        `json:"index"`
+	Timing               timingOutput                `json:"timing"`
+	Performance          pipeline.PerformanceMetrics `json:"performance"`
+	Resources            resource.Stats              `json:"resources"`
+	RiderPreview         []riderOutput               `json:"riderPreview"`
+	OrderPreview         []orderOutput               `json:"orderPreview"`
+	AssignmentPreview    []assignmentOutput          `json:"assignmentPreview"`
+	Report               report.Summary              `json:"report"`
 }
 
 type boundsOutput struct {
@@ -89,6 +97,15 @@ type assignmentOutput struct {
 
 type nearestMatcher interface {
 	Match(model.Order) (model.Assignment, error)
+	IndexStats() matchrule.IndexStats
+}
+
+type timingOutput struct {
+	RiderGenerationNs int64   `json:"riderGenerationNs"`
+	IndexBuildNs      int64   `json:"indexBuildNs"`
+	PipelineNs        int64   `json:"pipelineNs"`
+	TotalNs           int64   `json:"totalNs"`
+	ThroughputPerSec  float64 `json:"throughputOrdersPerSecond"`
 }
 
 func main() {
@@ -97,7 +114,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "invalid matcher configuration: %v\n", err)
 		os.Exit(2)
 	}
+	runtime.GC()
+	totalStarted := time.Now()
+	resourceMonitor, err := resource.Start(cfg.MonitorInterval)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "start resource monitor: %v\n", err)
+		os.Exit(1)
+	}
 
+	riderGenerationStarted := time.Now()
 	dataGenerator, err := generator.New(cfg.Seed, geo.SanFranciscoBounds)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create data generator: %v\n", err)
@@ -108,6 +133,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "generate riders: %v\n", err)
 		os.Exit(1)
 	}
+	riderGenerationDuration := time.Since(riderGenerationStarted)
+	indexBuildStarted := time.Now()
 	var selectedMatcher nearestMatcher
 	switch cfg.Algorithm {
 	case config.AlgorithmBruteForce:
@@ -121,6 +148,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "create %s matcher: %v\n", cfg.Algorithm, err)
 		os.Exit(1)
 	}
+	indexBuildDuration := time.Since(indexBuildStarted)
 	stream, err := dataGenerator.NewOrderStream(cfg.OrderCount, cfg.ArrivalWindow, cfg.ArrivalModel, cfg.OrderDistribution)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create order stream: %v\n", err)
@@ -135,16 +163,30 @@ func main() {
 		runContext, cancelTimeout = context.WithTimeout(runContext, cfg.RunTimeout)
 		defer cancelTimeout()
 	}
-	pipelineResult, err := pipeline.Run(runContext, stream, selectedMatcher, riders, pipeline.Options{
+	pipelineOptions := pipeline.Options{
 		Workers:         cfg.Workers,
 		BatchSize:       cfg.BatchSize,
 		ChannelCapacity: cfg.ChannelCapacity,
 		ExpectedOrders:  uint64(cfg.OrderCount),
 		PreviewSize:     previewSize,
-	})
+	}
+	memoryEstimate, err := pipeline.EstimateMemory(cfg.RiderCount, pipelineOptions)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "estimate pipeline memory: %v\n", err)
+		os.Exit(1)
+	}
+	pipelineStarted := time.Now()
+	pipelineResult, err := pipeline.Run(runContext, stream, selectedMatcher, riders, pipelineOptions)
+	pipelineDuration := time.Since(pipelineStarted)
+	resourceStats := resourceMonitor.Stop()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
+	}
+	totalDuration := time.Since(totalStarted)
+	throughput := 0.0
+	if pipelineDuration > 0 {
+		throughput = float64(pipelineResult.CompletedOrders) / pipelineDuration.Seconds()
 	}
 
 	bounds := dataGenerator.Bounds()
@@ -173,10 +215,21 @@ func main() {
 			MaxQueueDepth:        pipelineResult.MaxQueueDepth,
 			WorkerCompleted:      pipelineResult.WorkerCompleted,
 			GOMAXPROCS:           runtime.GOMAXPROCS(0),
-			RiderPreview:         displayRiders(riders, previewSize),
-			OrderPreview:         displayOrders(pipelineResult.OrderPreview),
-			AssignmentPreview:    displayAssignments(pipelineResult.AssignmentPreview),
-			Report:               pipelineResult.Report,
+			MemoryEstimate:       memoryEstimate,
+			Index:                selectedMatcher.IndexStats(),
+			Timing: timingOutput{
+				RiderGenerationNs: riderGenerationDuration.Nanoseconds(),
+				IndexBuildNs:      indexBuildDuration.Nanoseconds(),
+				PipelineNs:        pipelineDuration.Nanoseconds(),
+				TotalNs:           totalDuration.Nanoseconds(),
+				ThroughputPerSec:  throughput,
+			},
+			Performance:       pipelineResult.Performance,
+			Resources:         resourceStats,
+			RiderPreview:      displayRiders(riders, previewSize),
+			OrderPreview:      displayOrders(pipelineResult.OrderPreview),
+			AssignmentPreview: displayAssignments(pipelineResult.AssignmentPreview),
+			Report:            pipelineResult.Report,
 		},
 	}
 

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"unsafe"
 
 	matchrule "ride-sharing/internal/matcher"
 	"ride-sharing/internal/model"
@@ -20,6 +21,16 @@ type node struct {
 	axis       uint8
 	minX, maxX float64
 	minY, maxY float64
+}
+
+func (m Matcher) IndexStats() matchrule.IndexStats {
+	entrySize := uint64(unsafe.Sizeof(node{}))
+	return matchrule.IndexStats{
+		Kind:           "kd-tree-node-slice",
+		EntryCount:     len(m.nodes),
+		EntrySizeBytes: entrySize,
+		EstimatedBytes: uint64(len(m.nodes)) * entrySize,
+	}
 }
 
 type Matcher struct {

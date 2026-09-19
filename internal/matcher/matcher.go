@@ -10,6 +10,13 @@ import (
 	"ride-sharing/internal/model"
 )
 
+type IndexStats struct {
+	Kind           string `json:"kind"`
+	EntryCount     int    `json:"entryCount"`
+	EntrySizeBytes uint64 `json:"entrySizeBytes"`
+	EstimatedBytes uint64 `json:"estimatedBytes"`
+}
+
 func CopyAndValidateRiders(riders []model.Rider) ([]model.Rider, error) {
 	if len(riders) == 0 {
 		return nil, errors.New("at least one rider is required")

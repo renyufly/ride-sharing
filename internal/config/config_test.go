@@ -26,6 +26,7 @@ func TestParseOverrides(t *testing.T) {
 		"--orders=34",
 		"--arrival-window=5s",
 		"--timeout=1m",
+		"--monitor-interval=25ms",
 		"--arrival-model=front-loaded-burst",
 		"--seed=99",
 		"--rider-distribution=skewed",
@@ -40,7 +41,7 @@ func TestParseOverrides(t *testing.T) {
 		t.Fatalf("Parse() error = %v", err)
 	}
 
-	if cfg.RiderCount != 12 || cfg.OrderCount != 34 || cfg.ArrivalWindow != 5*time.Second || cfg.RunTimeout != time.Minute || cfg.Seed != 99 {
+	if cfg.RiderCount != 12 || cfg.OrderCount != 34 || cfg.ArrivalWindow != 5*time.Second || cfg.RunTimeout != time.Minute || cfg.MonitorInterval != 25*time.Millisecond || cfg.Seed != 99 {
 		t.Fatalf("Parse() basic overrides = %#v", cfg)
 	}
 	if cfg.ArrivalModel != generator.ArrivalFrontLoadedBurst || cfg.RiderDistribution != generator.DistributionSkewed || cfg.OrderDistribution != generator.DistributionHotspot {
@@ -93,5 +94,12 @@ func TestParseRejectsNegativeRunTimeout(t *testing.T) {
 	_, err := Parse([]string{"--timeout=-1s"})
 	if err == nil || !strings.Contains(err.Error(), "run timeout cannot be negative") {
 		t.Fatalf("Parse() error = %v, want negative timeout error", err)
+	}
+}
+
+func TestParseRejectsInvalidMonitorInterval(t *testing.T) {
+	_, err := Parse([]string{"--monitor-interval=0s"})
+	if err == nil || !strings.Contains(err.Error(), "monitor interval must be greater than zero") {
+		t.Fatalf("Parse() error = %v, want monitor interval error", err)
 	}
 }

@@ -192,6 +192,20 @@ func TestProducerHonorsPlannedArrival(t *testing.T) {
 		t.Fatalf("Run() elapsed = %s, producer ignored planned arrival", elapsed)
 	}
 	assertConservation(t, result, 2)
+	if result.Performance.AdmissionDelay.Count != 2 ||
+		result.Performance.QueueAndMatchLatency.Count != 2 ||
+		result.Performance.EndToEndLatency.Count != 2 {
+		t.Fatalf("latency sample counts = %+v, want 2 for every stage", result.Performance)
+	}
+	if result.Performance.PlannedArrivalWindowNs != int64(30*time.Millisecond) {
+		t.Fatalf("PlannedArrivalWindowNs = %d, want %d", result.Performance.PlannedArrivalWindowNs, 30*time.Millisecond)
+	}
+	if result.Performance.ActualInjectionNs < result.Performance.PlannedArrivalWindowNs {
+		t.Fatalf("ActualInjectionNs = %d, before planned window %d", result.Performance.ActualInjectionNs, result.Performance.PlannedArrivalWindowNs)
+	}
+	if result.Performance.TotalRunNs < result.Performance.ActualInjectionNs {
+		t.Fatalf("TotalRunNs = %d, before injection completed at %d", result.Performance.TotalRunNs, result.Performance.ActualInjectionNs)
+	}
 }
 
 func TestRunValidatesInputs(t *testing.T) {

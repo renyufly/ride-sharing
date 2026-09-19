@@ -32,6 +32,7 @@ type Config struct {
 	OrderCount             int
 	ArrivalWindow          time.Duration
 	RunTimeout             time.Duration
+	MonitorInterval        time.Duration
 	ArrivalModel           generator.ArrivalModel
 	Seed                   int64
 	RiderDistribution      generator.SpatialDistribution
@@ -53,6 +54,7 @@ type DisplayConfig struct {
 	OrderCount             int     `json:"orderCount"`
 	ArrivalWindow          string  `json:"arrivalWindow"`
 	RunTimeout             string  `json:"runTimeout"`
+	MonitorInterval        string  `json:"monitorInterval"`
 	ArrivalModel           string  `json:"arrivalModel"`
 	Seed                   int64   `json:"seed"`
 	RiderDistribution      string  `json:"riderDistribution"`
@@ -72,6 +74,7 @@ func Default() Config {
 		OrderCount:        10_000,
 		ArrivalWindow:     30 * time.Second,
 		RunTimeout:        0,
+		MonitorInterval:   100 * time.Millisecond,
 		ArrivalModel:      generator.ArrivalUniformWindow,
 		Seed:              42,
 		RiderDistribution: generator.DistributionUniform,
@@ -100,6 +103,7 @@ func Parse(args []string) (Config, error) {
 	flags.IntVar(&cfg.OrderCount, "orders", cfg.OrderCount, "number of orders")
 	flags.DurationVar(&cfg.ArrivalWindow, "arrival-window", cfg.ArrivalWindow, "order arrival window")
 	flags.DurationVar(&cfg.RunTimeout, "timeout", cfg.RunTimeout, "whole-run timeout; zero disables the deadline")
+	flags.DurationVar(&cfg.MonitorInterval, "monitor-interval", cfg.MonitorInterval, "Go runtime resource sampling interval")
 	flags.StringVar(&arrivalModel, "arrival-model", arrivalModel, "arrival model: uniform-window, front-loaded-burst, or unbounded")
 	flags.Int64Var(&cfg.Seed, "seed", cfg.Seed, "deterministic random seed")
 	flags.StringVar(&riderDistribution, "rider-distribution", riderDistribution, "rider distribution: uniform, hotspot, or skewed")
@@ -142,6 +146,9 @@ func (c Config) Validate() error {
 	if c.RunTimeout < 0 {
 		errs = append(errs, errors.New("run timeout cannot be negative"))
 	}
+	if c.MonitorInterval <= 0 {
+		errs = append(errs, errors.New("monitor interval must be greater than zero"))
+	}
 	if err := generator.ValidateArrivalModel(c.ArrivalModel); err != nil {
 		errs = append(errs, err)
 	}
@@ -178,6 +185,7 @@ func (c Config) Display() DisplayConfig {
 		OrderCount:             c.OrderCount,
 		ArrivalWindow:          c.ArrivalWindow.String(),
 		RunTimeout:             c.RunTimeout.String(),
+		MonitorInterval:        c.MonitorInterval.String(),
 		ArrivalModel:           string(c.ArrivalModel),
 		Seed:                   c.Seed,
 		RiderDistribution:      string(c.RiderDistribution),

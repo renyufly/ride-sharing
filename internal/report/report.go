@@ -17,6 +17,20 @@ const (
 	distanceHistogramMaxMeters = 50_000
 )
 
+type WorkerMemoryEstimate struct {
+	RiderCountBytes        uint64 `json:"riderCountBytes"`
+	DistanceHistogramBytes uint64 `json:"distanceHistogramBytes"`
+}
+
+// EstimateWorkerMemory reports the two dominant worker-private allocations.
+// It intentionally excludes slice headers and the shared immutable UID index.
+func EstimateWorkerMemory(riderCount int) WorkerMemoryEstimate {
+	return WorkerMemoryEstimate{
+		RiderCountBytes:        uint64(riderCount) * uint64(8),
+		DistanceHistogramBytes: uint64(distanceHistogramMaxMeters+1) * uint64(8),
+	}
+}
+
 type RiderOrderCount struct {
 	RiderUID   uint64 `json:"riderUid"`
 	OrderCount uint64 `json:"orderCount"`
@@ -41,7 +55,8 @@ type Summary struct {
 
 type Accumulator struct {
 	riderIndex                map[uint64]int
-	riderCounts               []RiderOrderCount
+	riderUIDs                 []uint64
+	riderCounts               []uint64
 	assignmentCount           uint64
 	distanceSumMicrometers    uint64
 	maxDistanceMeters         float64
@@ -56,7 +71,8 @@ func New(riders []model.Rider) (*Accumulator, error) {
 
 	accumulator := &Accumulator{
 		riderIndex:        make(map[uint64]int, len(riders)),
-		riderCounts:       make([]RiderOrderCount, len(riders)),
+		riderUIDs:         make([]uint64, len(riders)),
+		riderCounts:       make([]uint64, len(riders)),
 		distanceHistogram: make([]uint64, distanceHistogramMaxMeters+1),
 	}
 	for index, rider := range riders {
@@ -64,7 +80,7 @@ func New(riders []model.Rider) (*Accumulator, error) {
 			return nil, fmt.Errorf("duplicate rider UID %d", rider.UID)
 		}
 		accumulator.riderIndex[rider.UID] = index
-		accumulator.riderCounts[index].RiderUID = rider.UID
+		accumulator.riderUIDs[index] = rider.UID
 	}
 	return accumulator, nil
 }
@@ -72,13 +88,10 @@ func New(riders []model.Rider) (*Accumulator, error) {
 // Fork creates an empty worker-owned accumulator that shares only the
 // immutable UID-to-index map. Counts and distance metrics remain private.
 func (a *Accumulator) Fork() *Accumulator {
-	riderCounts := make([]RiderOrderCount, len(a.riderCounts))
-	for index, rider := range a.riderCounts {
-		riderCounts[index].RiderUID = rider.RiderUID
-	}
 	return &Accumulator{
 		riderIndex:        a.riderIndex,
-		riderCounts:       riderCounts,
+		riderUIDs:         a.riderUIDs,
+		riderCounts:       make([]uint64, len(a.riderCounts)),
 		distanceHistogram: make([]uint64, len(a.distanceHistogram)),
 	}
 }
@@ -99,7 +112,7 @@ func (a *Accumulator) Observe(assignment model.Assignment) error {
 	if distanceMicrometers > float64(^uint64(0)-a.distanceSumMicrometers) {
 		return fmt.Errorf("assignment distance sum overflows uint64 micrometers")
 	}
-	a.riderCounts[index].OrderCount++
+	a.riderCounts[index]++
 	a.assignmentCount++
 	a.distanceSumMicrometers += uint64(distanceMicrometers)
 	if distanceMeters > a.maxDistanceMeters {
@@ -123,19 +136,19 @@ func (a *Accumulator) Merge(source *Accumulator) error {
 	if source == nil {
 		return errors.New("cannot merge a nil accumulator")
 	}
-	if len(a.riderCounts) != len(source.riderCounts) || len(a.distanceHistogram) != len(source.distanceHistogram) {
+	if len(a.riderUIDs) != len(source.riderUIDs) || len(a.riderCounts) != len(source.riderCounts) || len(a.distanceHistogram) != len(source.distanceHistogram) {
 		return errors.New("cannot merge accumulators with different shapes")
 	}
 	if source.distanceSumMicrometers > ^uint64(0)-a.distanceSumMicrometers {
 		return errors.New("cannot merge distance sums: uint64 micrometers overflow")
 	}
-	for index := range a.riderCounts {
-		if a.riderCounts[index].RiderUID != source.riderCounts[index].RiderUID {
-			return fmt.Errorf("cannot merge rider index %d: UID %d != %d", index, a.riderCounts[index].RiderUID, source.riderCounts[index].RiderUID)
+	for index := range a.riderUIDs {
+		if a.riderUIDs[index] != source.riderUIDs[index] {
+			return fmt.Errorf("cannot merge rider index %d: UID %d != %d", index, a.riderUIDs[index], source.riderUIDs[index])
 		}
 	}
 	for index := range a.riderCounts {
-		a.riderCounts[index].OrderCount += source.riderCounts[index].OrderCount
+		a.riderCounts[index] += source.riderCounts[index]
 	}
 	for index, count := range source.distanceHistogram {
 		a.distanceHistogram[index] += count
@@ -151,24 +164,26 @@ func (a *Accumulator) Merge(source *Accumulator) error {
 
 func (a *Accumulator) Summary() Summary {
 	mean := float64(a.assignmentCount) / float64(len(a.riderCounts))
-	minOrders := a.riderCounts[0].OrderCount
+	minOrders := a.riderCounts[0]
 	var maxOrders uint64
 	var countSum uint64
 	var squaredDeviationSum float64
 	zeroRiders := 0
+	riderCounts := make([]RiderOrderCount, len(a.riderCounts))
 
-	for _, rider := range a.riderCounts {
-		countSum += rider.OrderCount
-		if rider.OrderCount == 0 {
+	for index, count := range a.riderCounts {
+		riderCounts[index] = RiderOrderCount{RiderUID: a.riderUIDs[index], OrderCount: count}
+		countSum += count
+		if count == 0 {
 			zeroRiders++
 		}
-		if rider.OrderCount < minOrders {
-			minOrders = rider.OrderCount
+		if count < minOrders {
+			minOrders = count
 		}
-		if rider.OrderCount > maxOrders {
-			maxOrders = rider.OrderCount
+		if count > maxOrders {
+			maxOrders = count
 		}
-		difference := float64(rider.OrderCount) - mean
+		difference := float64(count) - mean
 		squaredDeviationSum += difference * difference
 	}
 
@@ -186,7 +201,7 @@ func (a *Accumulator) Summary() Summary {
 	return Summary{
 		AssignmentCount:           a.assignmentCount,
 		RiderOrderCountSum:        countSum,
-		Bottom10:                  bottomRiders(a.riderCounts, bottomLimit),
+		Bottom10:                  bottomRiders(riderCounts, bottomLimit),
 		ZeroRiderCount:            zeroRiders,
 		MinOrders:                 minOrders,
 		MeanOrders:                mean,
