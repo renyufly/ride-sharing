@@ -81,7 +81,7 @@ func Default() Config {
 		OrderDistribution: generator.DistributionUniform,
 		Algorithm:         AlgorithmKDTree,
 		Workers:           2,
-		BatchSize:         256,
+		BatchSize:         1,
 		ChannelCapacity:   16,
 		Strategy:          StrategyNearest,
 	}

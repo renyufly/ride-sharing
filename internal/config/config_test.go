@@ -18,6 +18,9 @@ func TestParseDefaults(t *testing.T) {
 	if cfg != want {
 		t.Fatalf("Parse() = %#v, want %#v", cfg, want)
 	}
+	if cfg.RiderCount != 100 || cfg.OrderCount != 10_000 || cfg.ArrivalWindow != 30*time.Second || cfg.BatchSize != 1 {
+		t.Fatalf("default real-time scenario = %#v, want 100 riders, 10,000 orders, 30s and batch size 1", cfg)
+	}
 }
 
 func TestParseOverrides(t *testing.T) {
