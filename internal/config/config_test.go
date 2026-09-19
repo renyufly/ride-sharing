@@ -56,7 +56,7 @@ func TestParseOverrides(t *testing.T) {
 }
 
 func TestParseRejectsInvalidConfiguration(t *testing.T) {
-	_, err := Parse([]string{"--riders=0", "--strategy=balanced"})
+	_, err := Parse([]string{"--riders=0", "--strategy=unknown"})
 	if err == nil {
 		t.Fatal("Parse() error = nil, want validation error")
 	}
@@ -67,13 +67,36 @@ func TestParseRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
-func TestValidateKeepsStrategyBDisabled(t *testing.T) {
+func TestNearestRejectsStrategyBOptions(t *testing.T) {
 	cfg := Default()
 	cfg.TopK = 4
 
 	err := cfg.Validate()
-	if err == nil || !strings.Contains(err.Error(), "strategy B options") {
-		t.Fatalf("Validate() error = %v, want strategy B guard", err)
+	if err == nil || !strings.Contains(err.Error(), "require --strategy=balanced") {
+		t.Fatalf("Validate() error = %v, want nearest-strategy isolation guard", err)
+	}
+}
+
+func TestParseBalancedStrategy(t *testing.T) {
+	cfg, err := Parse([]string{"--strategy=balanced", "--top-k=8", "--max-extra-distance=300"})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if cfg.Strategy != StrategyBalanced || cfg.TopK != 8 || cfg.MaxExtraDistanceMeters != 300 {
+		t.Fatalf("balanced config = %#v", cfg)
+	}
+}
+
+func TestBalancedStrategyValidatesCandidateBounds(t *testing.T) {
+	tests := [][]string{
+		{"--strategy=balanced"},
+		{"--strategy=balanced", "--top-k=101"},
+		{"--strategy=balanced", "--top-k=8", "--max-extra-distance=-1"},
+	}
+	for _, args := range tests {
+		if _, err := Parse(args); err == nil {
+			t.Fatalf("Parse(%v) error = nil", args)
+		}
 	}
 }
 

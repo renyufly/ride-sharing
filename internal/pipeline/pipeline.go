@@ -60,10 +60,20 @@ type Result struct {
 	LastPlannedArrivalNs int64              `json:"lastPlannedArrivalNs"`
 	MaxQueueDepth        int                `json:"maxQueueDepthBatches"`
 	Performance          PerformanceMetrics `json:"performance"`
+	StrategyDetails      *StrategyMetrics   `json:"strategyDetails,omitempty"`
 	WorkerCompleted      []uint64           `json:"workerCompletedOrders"`
 	OrderPreview         []model.Order      `json:"-"`
 	AssignmentPreview    []model.Assignment `json:"-"`
 	Report               report.Summary     `json:"report"`
+}
+
+type StrategyMetrics struct {
+	TopK                     int      `json:"topK"`
+	MaxExtraDistanceMeters   float64  `json:"maxExtraDistanceMeters"`
+	ReorderWindow            int      `json:"reorderWindow"`
+	MaxCandidateQueueDepth   int      `json:"maxCandidateQueueDepth"`
+	MaxReorderDepth          int      `json:"maxReorderDepth"`
+	CandidateWorkerCompleted []uint64 `json:"candidateWorkerCompletedOrders"`
 }
 
 type PerformanceMetrics struct {

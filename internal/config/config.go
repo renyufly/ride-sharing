@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"time"
 
 	"ride-sharing/internal/generator"
@@ -21,12 +22,13 @@ const (
 type Strategy string
 
 const (
-	StrategyNearest Strategy = "nearest"
+	StrategyNearest  Strategy = "nearest"
+	StrategyBalanced Strategy = "balanced"
 )
 
-// Config contains the complete planned runtime surface. TopK and
-// MaxExtraDistanceMeters are reserved for strategy B and must remain disabled
-// while only the nearest-rider strategy is available.
+// Config contains the complete runtime surface. TopK and
+// MaxExtraDistanceMeters are explicit strategy B controls; validation rejects
+// them for the default nearest-rider strategy.
 type Config struct {
 	RiderCount             int
 	OrderCount             int
@@ -112,7 +114,9 @@ func Parse(args []string) (Config, error) {
 	flags.IntVar(&cfg.Workers, "workers", cfg.Workers, "matching worker count")
 	flags.IntVar(&cfg.BatchSize, "batch-size", cfg.BatchSize, "orders per batch")
 	flags.IntVar(&cfg.ChannelCapacity, "channel-capacity", cfg.ChannelCapacity, "bounded batch channel capacity")
-	flags.StringVar(&strategy, "strategy", strategy, "matching strategy (step one supports nearest only)")
+	flags.StringVar(&strategy, "strategy", strategy, "matching strategy: nearest or balanced")
+	flags.IntVar(&cfg.TopK, "top-k", cfg.TopK, "strategy B nearest-candidate count")
+	flags.Float64Var(&cfg.MaxExtraDistanceMeters, "max-extra-distance", cfg.MaxExtraDistanceMeters, "strategy B maximum distance beyond the nearest rider in meters")
 
 	if err := flags.Parse(args); err != nil {
 		return Config{}, err
@@ -170,11 +174,23 @@ func (c Config) Validate() error {
 	if c.ChannelCapacity <= 0 {
 		errs = append(errs, errors.New("channel capacity must be greater than zero"))
 	}
-	if c.Strategy != StrategyNearest {
-		errs = append(errs, fmt.Errorf("unsupported strategy %q: step one enables nearest only", c.Strategy))
-	}
-	if c.TopK != 0 || c.MaxExtraDistanceMeters != 0 {
-		errs = append(errs, errors.New("strategy B options must remain disabled until strategy A is complete"))
+	switch c.Strategy {
+	case StrategyNearest:
+		if c.TopK != 0 || c.MaxExtraDistanceMeters != 0 {
+			errs = append(errs, errors.New("strategy B options require --strategy=balanced"))
+		}
+	case StrategyBalanced:
+		if c.TopK <= 0 {
+			errs = append(errs, errors.New("top-k must be greater than zero for balanced strategy"))
+		}
+		if c.TopK > c.RiderCount {
+			errs = append(errs, errors.New("top-k cannot exceed rider count"))
+		}
+		if c.MaxExtraDistanceMeters < 0 || math.IsNaN(c.MaxExtraDistanceMeters) || math.IsInf(c.MaxExtraDistanceMeters, 0) {
+			errs = append(errs, errors.New("max extra distance must be finite and non-negative"))
+		}
+	default:
+		errs = append(errs, fmt.Errorf("unsupported strategy %q", c.Strategy))
 	}
 	return errors.Join(errs...)
 }

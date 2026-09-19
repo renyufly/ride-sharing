@@ -14,6 +14,41 @@ type Matcher struct {
 	riders []model.Rider
 }
 
+func (m Matcher) TopK(order model.Order, limit int) ([]matchrule.Candidate, error) {
+	return m.TopKInto(order, limit, nil)
+}
+
+func (m Matcher) TopKInto(order model.Order, limit int, destination []matchrule.Candidate) ([]matchrule.Candidate, error) {
+	if len(m.riders) == 0 {
+		return nil, errors.New("matcher has no riders")
+	}
+	if limit <= 0 {
+		return nil, errors.New("top-k limit must be greater than zero")
+	}
+	if !matchrule.IsFinitePoint(order.Point) {
+		return nil, fmt.Errorf("order %d has a non-finite projected point", order.ID)
+	}
+	if limit > len(m.riders) {
+		limit = len(m.riders)
+	}
+	if cap(destination) < limit {
+		destination = make([]matchrule.Candidate, 0, limit)
+	} else {
+		destination = destination[:0]
+	}
+	candidates := destination
+	for _, rider := range m.riders {
+		candidate := matchrule.Candidate{
+			RiderUID:              rider.UID,
+			DistanceSquaredMeters: matchrule.DistanceSquared(order.Point, rider.Point),
+		}
+		candidates = matchrule.RetainCandidate(candidates, limit, candidate)
+	}
+	result := candidates
+	matchrule.SortCandidates(result)
+	return result, nil
+}
+
 func (m Matcher) IndexStats() matchrule.IndexStats {
 	entrySize := uint64(unsafe.Sizeof(model.Rider{}))
 	return matchrule.IndexStats{

@@ -2,6 +2,7 @@ package kdtree
 
 import (
 	"math"
+	"reflect"
 	"testing"
 	"time"
 
@@ -88,6 +89,66 @@ func TestMatchesBruteForceForGeneratedScenarios(t *testing.T) {
 
 func TestMatchesBruteForceAtRequiredBaselineScale(t *testing.T) {
 	compareGeneratedMatchers(t, 100, 10_000, generator.DistributionUniform, generator.DistributionUniform)
+}
+
+func TestTopKMatchesBruteForceAndIsStable(t *testing.T) {
+	dataGenerator, err := generator.New(91, geo.SanFranciscoBounds)
+	if err != nil {
+		t.Fatalf("generator.New() error = %v", err)
+	}
+	riders, err := dataGenerator.GenerateRiders(127, generator.DistributionHotspot)
+	if err != nil {
+		t.Fatalf("GenerateRiders() error = %v", err)
+	}
+	baseline, err := bruteforce.New(riders)
+	if err != nil {
+		t.Fatalf("bruteforce.New() error = %v", err)
+	}
+	tree := mustMatcher(t, riders)
+	stream, err := dataGenerator.NewOrderStream(500, 0, generator.ArrivalUnbounded, generator.DistributionSkewed)
+	if err != nil {
+		t.Fatalf("NewOrderStream() error = %v", err)
+	}
+	for {
+		order, ok, err := stream.Next()
+		if err != nil {
+			t.Fatalf("Next() error = %v", err)
+		}
+		if !ok {
+			break
+		}
+		for _, limit := range []int{1, 4, 8, 32, len(riders), len(riders) + 10} {
+			want, err := baseline.TopK(order, limit)
+			if err != nil {
+				t.Fatalf("bruteforce.TopK(sequence=%d, limit=%d) error = %v", order.Sequence, limit, err)
+			}
+			got, err := tree.TopK(order, limit)
+			if err != nil {
+				t.Fatalf("kdtree.TopK(sequence=%d, limit=%d) error = %v", order.Sequence, limit, err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("sequence %d limit %d: kdtree TopK = %+v, brute-force = %+v", order.Sequence, limit, got, want)
+			}
+		}
+	}
+}
+
+func TestTopKBreaksEqualDistanceByUID(t *testing.T) {
+	riders := []model.Rider{
+		{UID: 9, Point: model.Point2D{X: 1}},
+		{UID: 3, Point: model.Point2D{X: -1}},
+		{UID: 7, Point: model.Point2D{Y: 1}},
+		{UID: 1, Point: model.Point2D{Y: -1}},
+	}
+	candidates, err := mustMatcher(t, riders).TopK(model.Order{}, 3)
+	if err != nil {
+		t.Fatalf("TopK() error = %v", err)
+	}
+	for index, wantUID := range []uint64{1, 3, 7} {
+		if candidates[index].RiderUID != wantUID {
+			t.Fatalf("candidate %d UID = %d, want %d; candidates=%+v", index, candidates[index].RiderUID, wantUID, candidates)
+		}
+	}
 }
 
 func TestMatchesBruteForceOnBoundaryOrders(t *testing.T) {

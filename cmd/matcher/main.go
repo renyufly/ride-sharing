@@ -1,6 +1,7 @@
 // Command matcher is the standalone entry point for the matching exercise.
 //
-// Step six runs exact nearest-rider matching through a bounded CSP pipeline.
+// It exposes the frozen nearest baseline and the explicitly selected balanced
+// extension as separate bounded CSP pipelines.
 package main
 
 import (
@@ -32,29 +33,31 @@ type startupOutput struct {
 }
 
 type dataOutput struct {
-	Bounds               boundsOutput                `json:"bounds"`
-	ProjectionOrigin     geoPointOutput              `json:"projectionOrigin"`
-	EarthRadiusMeters    float64                     `json:"earthRadiusMeters"`
-	RiderSeed            int64                       `json:"riderSeed"`
-	OrderSeed            int64                       `json:"orderSeed"`
-	GeneratedRiderCount  int                         `json:"generatedRiderCount"`
-	GeneratedOrderCount  int                         `json:"generatedOrderCount"`
-	AdmittedOrderCount   int                         `json:"admittedOrderCount"`
-	MatchedOrderCount    int                         `json:"matchedOrderCount"`
-	UnfinishedOrderCount int                         `json:"unfinishedOrderCount"`
-	LastPlannedArrivalNs int64                       `json:"lastPlannedArrivalNs"`
-	MaxQueueDepth        int                         `json:"maxQueueDepthBatches"`
-	WorkerCompleted      []uint64                    `json:"workerCompletedOrders"`
-	GOMAXPROCS           int                         `json:"gomaxprocs"`
-	MemoryEstimate       pipeline.MemoryEstimate     `json:"memoryEstimate"`
-	Index                matchrule.IndexStats        `json:"index"`
-	Timing               timingOutput                `json:"timing"`
-	Performance          pipeline.PerformanceMetrics `json:"performance"`
-	Resources            resource.Stats              `json:"resources"`
-	RiderPreview         []riderOutput               `json:"riderPreview"`
-	OrderPreview         []orderOutput               `json:"orderPreview"`
-	AssignmentPreview    []assignmentOutput          `json:"assignmentPreview"`
-	Report               report.Summary              `json:"report"`
+	Bounds               boundsOutput                     `json:"bounds"`
+	ProjectionOrigin     geoPointOutput                   `json:"projectionOrigin"`
+	EarthRadiusMeters    float64                          `json:"earthRadiusMeters"`
+	RiderSeed            int64                            `json:"riderSeed"`
+	OrderSeed            int64                            `json:"orderSeed"`
+	GeneratedRiderCount  int                              `json:"generatedRiderCount"`
+	GeneratedOrderCount  int                              `json:"generatedOrderCount"`
+	AdmittedOrderCount   int                              `json:"admittedOrderCount"`
+	MatchedOrderCount    int                              `json:"matchedOrderCount"`
+	UnfinishedOrderCount int                              `json:"unfinishedOrderCount"`
+	LastPlannedArrivalNs int64                            `json:"lastPlannedArrivalNs"`
+	MaxQueueDepth        int                              `json:"maxQueueDepthBatches"`
+	WorkerCompleted      []uint64                         `json:"workerCompletedOrders"`
+	GOMAXPROCS           int                              `json:"gomaxprocs"`
+	MemoryEstimate       *pipeline.MemoryEstimate         `json:"memoryEstimate,omitempty"`
+	BalancedMemory       *pipeline.BalancedMemoryEstimate `json:"balancedMemoryEstimate,omitempty"`
+	Index                matchrule.IndexStats             `json:"index"`
+	Timing               timingOutput                     `json:"timing"`
+	Performance          pipeline.PerformanceMetrics      `json:"performance"`
+	Resources            resource.Stats                   `json:"resources"`
+	RiderPreview         []riderOutput                    `json:"riderPreview"`
+	OrderPreview         []orderOutput                    `json:"orderPreview"`
+	AssignmentPreview    []assignmentOutput               `json:"assignmentPreview"`
+	Report               report.Summary                   `json:"report"`
+	StrategyDetails      *pipeline.StrategyMetrics        `json:"strategyDetails,omitempty"`
 }
 
 type boundsOutput struct {
@@ -97,6 +100,7 @@ type assignmentOutput struct {
 
 type nearestMatcher interface {
 	Match(model.Order) (model.Assignment, error)
+	TopKInto(model.Order, int, []matchrule.Candidate) ([]matchrule.Candidate, error)
 	IndexStats() matchrule.IndexStats
 }
 
@@ -170,13 +174,37 @@ func main() {
 		ExpectedOrders:  uint64(cfg.OrderCount),
 		PreviewSize:     previewSize,
 	}
-	memoryEstimate, err := pipeline.EstimateMemory(cfg.RiderCount, pipelineOptions)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "estimate pipeline memory: %v\n", err)
-		os.Exit(1)
+	var memoryEstimate *pipeline.MemoryEstimate
+	if cfg.Strategy == config.StrategyNearest {
+		estimate, estimateErr := pipeline.EstimateMemory(cfg.RiderCount, pipelineOptions)
+		if estimateErr != nil {
+			fmt.Fprintf(os.Stderr, "estimate pipeline memory: %v\n", estimateErr)
+			os.Exit(1)
+		}
+		memoryEstimate = &estimate
 	}
+	var balancedMemory *pipeline.BalancedMemoryEstimate
 	pipelineStarted := time.Now()
-	pipelineResult, err := pipeline.Run(runContext, stream, selectedMatcher, riders, pipelineOptions)
+	var pipelineResult pipeline.Result
+	switch cfg.Strategy {
+	case config.StrategyNearest:
+		pipelineResult, err = pipeline.Run(runContext, stream, selectedMatcher, riders, pipelineOptions)
+	case config.StrategyBalanced:
+		balancedOptions := pipeline.BalancedOptions{
+			Options:                pipelineOptions,
+			TopK:                   cfg.TopK,
+			MaxExtraDistanceMeters: cfg.MaxExtraDistanceMeters,
+		}
+		estimate, estimateErr := pipeline.EstimateBalancedMemory(cfg.RiderCount, balancedOptions)
+		if estimateErr != nil {
+			fmt.Fprintf(os.Stderr, "estimate balanced pipeline memory: %v\n", estimateErr)
+			os.Exit(1)
+		}
+		balancedMemory = &estimate
+		pipelineResult, err = pipeline.RunBalanced(runContext, stream, selectedMatcher, riders, balancedOptions)
+	default:
+		err = fmt.Errorf("unsupported strategy %q", cfg.Strategy)
+	}
 	pipelineDuration := time.Since(pipelineStarted)
 	resourceStats := resourceMonitor.Stop()
 	if err != nil {
@@ -191,9 +219,15 @@ func main() {
 
 	bounds := dataGenerator.Bounds()
 	seeds := dataGenerator.Seeds()
+	phase := fmt.Sprintf("csp-%s-report", cfg.Algorithm)
+	message := "all orders matched exactly through the bounded CSP pipeline"
+	if cfg.Strategy == config.StrategyBalanced {
+		phase = fmt.Sprintf("csp-balanced-%s-report", cfg.Algorithm)
+		message = "all orders assigned deterministically through the load-aware bounded CSP pipeline"
+	}
 	output := startupOutput{
-		Phase:   fmt.Sprintf("csp-%s-report", cfg.Algorithm),
-		Message: "all orders matched exactly through the bounded CSP pipeline",
+		Phase:   phase,
+		Message: message,
 		Config:  cfg.Display(),
 		Data: dataOutput{
 			Bounds: boundsOutput{
@@ -216,6 +250,7 @@ func main() {
 			WorkerCompleted:      pipelineResult.WorkerCompleted,
 			GOMAXPROCS:           runtime.GOMAXPROCS(0),
 			MemoryEstimate:       memoryEstimate,
+			BalancedMemory:       balancedMemory,
 			Index:                selectedMatcher.IndexStats(),
 			Timing: timingOutput{
 				RiderGenerationNs: riderGenerationDuration.Nanoseconds(),
@@ -230,6 +265,7 @@ func main() {
 			OrderPreview:      displayOrders(pipelineResult.OrderPreview),
 			AssignmentPreview: displayAssignments(pipelineResult.AssignmentPreview),
 			Report:            pipelineResult.Report,
+			StrategyDetails:   pipelineResult.StrategyDetails,
 		},
 	}
 

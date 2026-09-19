@@ -17,6 +17,74 @@ type IndexStats struct {
 	EstimatedBytes uint64 `json:"estimatedBytes"`
 }
 
+type Candidate struct {
+	RiderUID              uint64  `json:"riderUid"`
+	DistanceSquaredMeters float64 `json:"distanceSquaredMeters"`
+}
+
+func CandidateLess(first, second Candidate) bool {
+	return IsBetter(
+		first.DistanceSquaredMeters,
+		first.RiderUID,
+		second.DistanceSquaredMeters,
+		second.RiderUID,
+	)
+}
+
+// SortCandidates uses allocation-free insertion sort. Top-K is deliberately
+// small, so O(K²) comparisons are cheaper than reflection-backed sort.Slice
+// and avoid per-order heap allocations on the hot path.
+func SortCandidates(candidates []Candidate) {
+	for index := 1; index < len(candidates); index++ {
+		value := candidates[index]
+		position := index
+		for position > 0 && CandidateLess(value, candidates[position-1]) {
+			candidates[position] = candidates[position-1]
+			position--
+		}
+		candidates[position] = value
+	}
+}
+
+// RetainCandidate maintains a max-heap containing the best limit candidates
+// without interface conversions or allocations.
+func RetainCandidate(candidates []Candidate, limit int, candidate Candidate) []Candidate {
+	if len(candidates) < limit {
+		candidates = append(candidates, candidate)
+		index := len(candidates) - 1
+		for index > 0 {
+			parent := (index - 1) / 2
+			if !CandidateLess(candidates[parent], candidates[index]) {
+				break
+			}
+			candidates[parent], candidates[index] = candidates[index], candidates[parent]
+			index = parent
+		}
+		return candidates
+	}
+	if !CandidateLess(candidate, candidates[0]) {
+		return candidates
+	}
+	candidates[0] = candidate
+	for index := 0; ; {
+		left := index*2 + 1
+		if left >= len(candidates) {
+			break
+		}
+		worst := left
+		right := left + 1
+		if right < len(candidates) && CandidateLess(candidates[worst], candidates[right]) {
+			worst = right
+		}
+		if !CandidateLess(candidates[index], candidates[worst]) {
+			break
+		}
+		candidates[index], candidates[worst] = candidates[worst], candidates[index]
+		index = worst
+	}
+	return candidates
+}
+
 func CopyAndValidateRiders(riders []model.Rider) ([]model.Rider, error) {
 	if len(riders) == 0 {
 		return nil, errors.New("at least one rider is required")

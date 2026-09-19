@@ -124,6 +124,38 @@ func (m Matcher) Match(order model.Order) (model.Assignment, error) {
 	}, nil
 }
 
+// TopK returns the exact K nearest riders ordered by distance and UID. It is
+// additive to Match so strategy A keeps its frozen single-nearest path.
+func (m Matcher) TopK(order model.Order, limit int) ([]matchrule.Candidate, error) {
+	return m.TopKInto(order, limit, nil)
+}
+
+func (m Matcher) TopKInto(order model.Order, limit int, destination []matchrule.Candidate) ([]matchrule.Candidate, error) {
+	if m.root == missingNode || len(m.nodes) == 0 {
+		return nil, errors.New("matcher has no riders")
+	}
+	if limit <= 0 {
+		return nil, errors.New("top-k limit must be greater than zero")
+	}
+	if !matchrule.IsFinitePoint(order.Point) {
+		return nil, fmt.Errorf("order %d has a non-finite projected point", order.ID)
+	}
+	if limit > len(m.nodes) {
+		limit = len(m.nodes)
+	}
+
+	if cap(destination) < limit {
+		destination = make([]matchrule.Candidate, 0, limit)
+	} else {
+		destination = destination[:0]
+	}
+	candidates := destination
+	m.searchTopK(m.root, order.Point, limit, &candidates)
+	result := candidates
+	matchrule.SortCandidates(result)
+	return result, nil
+}
+
 type nearest struct {
 	riderUID uint64
 	distance float64
@@ -154,6 +186,33 @@ func (m Matcher) search(nodeIndex int, target model.Point2D, best *nearest) {
 	if second.index != missingNode && second.lowerBound <= best.distance {
 		m.search(second.index, target, best)
 	}
+}
+
+func (m Matcher) searchTopK(nodeIndex int, target model.Point2D, limit int, candidates *[]matchrule.Candidate) {
+	current := m.nodes[nodeIndex]
+	candidate := matchrule.Candidate{
+		RiderUID:              current.rider.UID,
+		DistanceSquaredMeters: matchrule.DistanceSquared(target, current.rider.Point),
+	}
+	*candidates = matchrule.RetainCandidate(*candidates, limit, candidate)
+
+	first := m.childCandidate(current.left, target)
+	second := m.childCandidate(current.right, target)
+	if second.index != missingNode && (first.index == missingNode || second.lowerBound < first.lowerBound) {
+		first, second = second, first
+	}
+
+	if m.topKChildCanImprove(first, limit, candidates) {
+		m.searchTopK(first.index, target, limit, candidates)
+	}
+	if m.topKChildCanImprove(second, limit, candidates) {
+		m.searchTopK(second.index, target, limit, candidates)
+	}
+}
+
+func (m Matcher) topKChildCanImprove(child childCandidate, limit int, candidates *[]matchrule.Candidate) bool {
+	return child.index != missingNode &&
+		(len(*candidates) < limit || child.lowerBound <= (*candidates)[0].DistanceSquaredMeters)
 }
 
 func (m Matcher) childCandidate(nodeIndex int, target model.Point2D) childCandidate {
