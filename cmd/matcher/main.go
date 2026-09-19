@@ -1,7 +1,7 @@
 // Command matcher is the standalone entry point for the matching exercise.
 //
-// Step three generates deterministic data and applies the serial brute-force
-// nearest-rider baseline.
+// Step five generates deterministic data and applies either exact serial
+// brute-force matching or exact serial KD-tree matching.
 package main
 
 import (
@@ -13,6 +13,7 @@ import (
 	"ride-sharing/internal/generator"
 	"ride-sharing/internal/geo"
 	"ride-sharing/internal/matcher/bruteforce"
+	"ride-sharing/internal/matcher/kdtree"
 	"ride-sharing/internal/model"
 	"ride-sharing/internal/report"
 )
@@ -78,6 +79,10 @@ type assignmentOutput struct {
 	DistanceSquaredMeters float64 `json:"distanceSquaredMeters"`
 }
 
+type nearestMatcher interface {
+	Match(model.Order) (model.Assignment, error)
+}
+
 func main() {
 	cfg, err := config.Parse(os.Args[1:])
 	if err != nil {
@@ -95,13 +100,17 @@ func main() {
 		fmt.Fprintf(os.Stderr, "generate riders: %v\n", err)
 		os.Exit(1)
 	}
-	if cfg.Algorithm != config.AlgorithmBruteForce {
-		fmt.Fprintf(os.Stderr, "algorithm %q is not implemented in step three\n", cfg.Algorithm)
-		os.Exit(2)
+	var selectedMatcher nearestMatcher
+	switch cfg.Algorithm {
+	case config.AlgorithmBruteForce:
+		selectedMatcher, err = bruteforce.New(riders)
+	case config.AlgorithmKDTree:
+		selectedMatcher, err = kdtree.New(riders)
+	default:
+		err = fmt.Errorf("unsupported algorithm %q", cfg.Algorithm)
 	}
-	nearestMatcher, err := bruteforce.New(riders)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "create brute-force matcher: %v\n", err)
+		fmt.Fprintf(os.Stderr, "create %s matcher: %v\n", cfg.Algorithm, err)
 		os.Exit(1)
 	}
 	reporter, err := report.New(riders)
@@ -132,7 +141,7 @@ func main() {
 		}
 		generatedOrders++
 		lastPlannedArrival = order.PlannedArrivalNs
-		assignment, err := nearestMatcher.Match(order)
+		assignment, err := selectedMatcher.Match(order)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "match order sequence %d: %v\n", order.Sequence, err)
 			os.Exit(1)
@@ -163,8 +172,8 @@ func main() {
 		os.Exit(1)
 	}
 	output := startupOutput{
-		Phase:   "serial-brute-force-report",
-		Message: "all orders matched and summarized; KD-tree and concurrency are not implemented in step four",
+		Phase:   fmt.Sprintf("serial-%s-report", cfg.Algorithm),
+		Message: "all orders matched exactly and summarized; concurrency is not implemented in step five",
 		Config:  cfg.Display(),
 		Data: dataOutput{
 			Bounds: boundsOutput{
