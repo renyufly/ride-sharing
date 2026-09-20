@@ -25,6 +25,11 @@ import (
 	"ride-sharing/internal/resource"
 )
 
+// 整个“骑手-订单匹配程序”的总执行
+// 负责把 config → generator → matcher → pipeline → report/resource
+// 这些模块串起来，最后输出一份 JSON 实验报告
+
+// main.go 负责组装系统，真正的并发匹配逻辑在 pipeline.Run() / pipeline.RunBalanced() 里面
 type startupOutput struct {
 	Phase   string               `json:"phase"`
 	Message string               `json:"message"`
@@ -98,7 +103,8 @@ type assignmentOutput struct {
 	DistanceSquaredMeters float64 `json:"distanceSquaredMeters"`
 }
 
-type nearestMatcher interface {
+// 面向接口编程
+type nearestMatcher interface {  
 	Match(model.Order) (model.Assignment, error)
 	TopKInto(model.Order, int, []matchrule.Candidate) ([]matchrule.Candidate, error)
 	IndexStats() matchrule.IndexStats
@@ -113,21 +119,21 @@ type timingOutput struct {
 }
 
 func main() {
-	cfg, err := config.Parse(os.Args[1:])
+	cfg, err := config.Parse(os.Args[1:]) // 读取配置
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "invalid matcher configuration: %v\n", err)
 		os.Exit(2)
 	}
-	runtime.GC()
+	runtime.GC()  // 主动触发一次 Go GC, 为了性能测试更加干净
 	totalStarted := time.Now()
-	resourceMonitor, err := resource.Start(cfg.MonitorInterval)
+	resourceMonitor, err := resource.Start(cfg.MonitorInterval) // 启动资源监控, 定期记录：CPU 内存 GC goroutine
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "start resource monitor: %v\n", err)
 		os.Exit(1)
 	}
 
 	riderGenerationStarted := time.Now()
-	dataGenerator, err := generator.New(cfg.Seed, geo.SanFranciscoBounds)
+	dataGenerator, err := generator.New(cfg.Seed, geo.SanFranciscoBounds) // 创建随机数据生成器，生成骑手
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create data generator: %v\n", err)
 		os.Exit(1)
@@ -137,9 +143,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "generate riders: %v\n", err)
 		os.Exit(1)
 	}
-	riderGenerationDuration := time.Since(riderGenerationStarted)
-	indexBuildStarted := time.Now()
+	riderGenerationDuration := time.Since(riderGenerationStarted) // 统计生成时间
+	
+	indexBuildStarted := time.Now() // KD-Tree 正式匹配之前需要建索引
+	
 	var selectedMatcher nearestMatcher
+	// 创建 Matcher：两种算法“找附近骑手”
 	switch cfg.Algorithm {
 	case config.AlgorithmBruteForce:
 		selectedMatcher, err = bruteforce.New(riders)
@@ -148,32 +157,46 @@ func main() {
 	default:
 		err = fmt.Errorf("unsupported algorithm %q", cfg.Algorithm)
 	}
+	
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create %s matcher: %v\n", cfg.Algorithm, err)
 		os.Exit(1)
 	}
+
+	// indexBuildDuration - 建立 KDTree 花多久
 	indexBuildDuration := time.Since(indexBuildStarted)
+	
+	// 创建订单流，而不是直接创建 1 万订单
 	stream, err := dataGenerator.NewOrderStream(cfg.OrderCount, cfg.ArrivalWindow, cfg.ArrivalModel, cfg.OrderDistribution)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create order stream: %v\n", err)
 		os.Exit(1)
 	}
 
-	const previewSize = 3
+	const previewSize = 3  // 只 Preview 3 条数据(完整数据参与计算，只保存极少数样本用于验证)
+
+	// Context + Goroutine 生命周期管理：控制整个并发 Pipeline 生命周期
 	runContext, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stopSignal()
+	// 支持超时 (pipeline 最多运行 x 秒，之后所有 goroutine停止)
 	if cfg.RunTimeout > 0 {
 		var cancelTimeout context.CancelFunc
 		runContext, cancelTimeout = context.WithTimeout(runContext, cfg.RunTimeout)
 		defer cancelTimeout()
 	}
+
+	// CSP Pipeline 核心调优参数
 	pipelineOptions := pipeline.Options{
 		Workers:         cfg.Workers,
-		BatchSize:       cfg.BatchSize,
+		BatchSize:       cfg.BatchSize,   // 一次处理多少订单
 		ChannelCapacity: cfg.ChannelCapacity,
 		ExpectedOrders:  uint64(cfg.OrderCount),
 		PreviewSize:     previewSize,
 	}
+
+	// 提前估算内存
+	// 不要因为订单总数是 1000 万，就让内存同时保存 1000 万个订单
+	// bounded CSP pipeline 中的 bounded
 	var memoryEstimate *pipeline.MemoryEstimate
 	if cfg.Strategy == config.StrategyNearest {
 		estimate, estimateErr := pipeline.EstimateMemory(cfg.RiderCount, pipelineOptions)
@@ -183,13 +206,21 @@ func main() {
 		}
 		memoryEstimate = &estimate
 	}
+
 	var balancedMemory *pipeline.BalancedMemoryEstimate
 	pipelineStarted := time.Now()
+
+	// pipelineResult - 最终实验结果的核心
 	var pipelineResult pipeline.Result
+	
+	// 真正开始并发匹配：pipeline.Run()
 	switch cfg.Strategy {
 	case config.StrategyNearest:
+		// 距离优先
 		pipelineResult, err = pipeline.Run(runContext, stream, selectedMatcher, riders, pipelineOptions)
+	
 	case config.StrategyBalanced:
+		// 负载均衡-pipeline.RunBalanced()
 		balancedOptions := pipeline.BalancedOptions{
 			Options:                pipelineOptions,
 			TopK:                   cfg.TopK,
@@ -205,14 +236,23 @@ func main() {
 	default:
 		err = fmt.Errorf("unsupported strategy %q", cfg.Strategy)
 	}
+	
+	// 计算性能
+
+	// pipelineDuration-真正匹配订单花多久
 	pipelineDuration := time.Since(pipelineStarted)
-	resourceStats := resourceMonitor.Stop()
+	
+	resourceStats := resourceMonitor.Stop()  // 停止资源监控
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
+
+	// totalDuration - 整个程序总耗时
 	totalDuration := time.Since(totalStarted)
-	throughput := 0.0
+	
+	// throughput：x订单/秒，系统每秒可以完成多少笔订单匹配
+	throughput := 0.0 
 	if pipelineDuration > 0 {
 		throughput = float64(pipelineResult.CompletedOrders) / pipelineDuration.Seconds()
 	}
@@ -225,6 +265,8 @@ func main() {
 		phase = fmt.Sprintf("csp-balanced-%s-report", cfg.Algorithm)
 		message = "all orders assigned deterministically through the load-aware bounded CSP pipeline"
 	}
+
+	// 把之前计算出来的结果装进一个 JSON DTO
 	output := startupOutput{
 		Phase:   phase,
 		Message: message,
@@ -269,6 +311,7 @@ func main() {
 		},
 	}
 
+	// json.NewEncoder 最终输出
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(output); err != nil {
@@ -277,6 +320,8 @@ func main() {
 	}
 }
 
+// displayXXX：DTO 转换: 内部业务 Model -> 用于 JSON 展示的 Model
+// 内部数据结构和对外输出格式解耦
 func displayRiders(riders []model.Rider, limit int) []riderOutput {
 	if limit > len(riders) {
 		limit = len(riders)
