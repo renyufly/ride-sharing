@@ -12,22 +12,29 @@ import (
 	"ride-sharing/internal/model"
 )
 
-type ArrivalModel string
+// 压测数据发生器
 
+type ArrivalModel string  // 订单什么时候到
+// uniform-window 均匀到达：订单均匀铺在整个 30 秒窗口
+// front-loaded-burst 前置突发流量：前 20% 时间到达 80% 的订单
+// unbounded 所有订单都可以立即进入系统 (测系统纯粹的最大吞吐能力, 不模拟真实到达时间)
 const (
 	ArrivalUniformWindow    ArrivalModel = "uniform-window"
 	ArrivalFrontLoadedBurst ArrivalModel = "front-loaded-burst"
 	ArrivalUnbounded        ArrivalModel = "unbounded"
 )
 
-type SpatialDistribution string
-
+type SpatialDistribution string  // 骑手/订单在哪里
+// Uniform：完全随机分布
+// Hotspot：热点区域 (很符合网约车场景)
+// Skewed：偏斜分布 (极端不均衡的地理分布)
 const (
 	DistributionUniform SpatialDistribution = "uniform"
 	DistributionHotspot SpatialDistribution = "hotspot"
 	DistributionSkewed  SpatialDistribution = "skewed"
 )
 
+// 预先定义三个热点 (地图内部的相对位置)
 var hotspotCenters = [...]struct {
 	latitudeRatio  float64
 	longitudeRatio float64
@@ -79,6 +86,7 @@ func (g Generator) Seeds() Seeds {
 	return g.seeds
 }
 
+// 一次生成所有骑手
 func (g Generator) GenerateRiders(count int, distribution SpatialDistribution) ([]model.Rider, error) {
 	if count <= 0 {
 		return nil, errors.New("rider count must be greater than zero")
@@ -89,6 +97,11 @@ func (g Generator) GenerateRiders(count int, distribution SpatialDistribution) (
 
 	random := rand.New(rand.NewSource(g.seeds.Rider))
 	riders := make([]model.Rider, count)
+
+	// 这里骑手数量相比千万订单小很多，
+	// 而且后面的匹配算法本来就需要长期持有骑手数据，
+	// 所以一次性放内存是合理的
+
 	for index := range riders {
 		location := samplePoint(random, g.bounds, distribution)
 		point, err := g.projector.Project(location)
@@ -106,6 +119,7 @@ func (g Generator) GenerateRiders(count int, distribution SpatialDistribution) (
 
 // NewOrderStream returns a fresh replayable stream. Calling it again with the
 // same arguments restarts the exact order sequence from Sequence 0.
+// Streaming Generation（流式生成）
 func (g Generator) NewOrderStream(count int, window time.Duration, arrival ArrivalModel, distribution SpatialDistribution) (*OrderStream, error) {
 	if count <= 0 {
 		return nil, errors.New("order count must be greater than zero")
@@ -132,6 +146,7 @@ func (g Generator) NewOrderStream(count int, window time.Duration, arrival Arriv
 	}, nil
 }
 
+// 不保存全部订单，只记住 要生成多少订单、当前生成到第几个、随机数生成器状态
 type OrderStream struct {
 	nextSequence uint64
 	total        uint64
@@ -146,12 +161,26 @@ type OrderStream struct {
 
 // Next generates one order. It does not sleep until PlannedArrivalNs; the CSP
 // pipeline added later owns pacing and admission-delay measurement.
+// 整个订单生成器的核心
+// stream.Next()调用后订单立即生成
+// Generator
+//     ↓
+// 只负责：
+// "订单应该什么时候来"
+// CSP pipeline
+//     ↓
+// 负责：
+// "真的什么时候把订单送进去"
 func (s *OrderStream) Next() (model.Order, bool, error) {
+	// 返回值 bool 表示 还有没有订单
+
 	if s.nextSequence >= s.total {
 		return model.Order{}, false, nil
 	}
 
 	sequence := s.nextSequence
+
+	// 生成订单位置
 	location := samplePoint(s.random, s.bounds, s.distribution)
 	point, err := s.projector.Project(location)
 	if err != nil {
@@ -159,7 +188,7 @@ func (s *OrderStream) Next() (model.Order, bool, error) {
 	}
 
 	order := model.Order{
-		ID:               mix64(uint64(s.orderSeed) + sequence),
+		ID:               mix64(uint64(s.orderSeed) + sequence),  // Order ID 不是 Sequence
 		Sequence:         sequence,
 		PlannedArrivalNs: plannedArrival(sequence, s.total, s.window, s.arrival).Nanoseconds(),
 		Pickup:           location,
@@ -215,6 +244,7 @@ func samplePoint(random *rand.Rand, bounds geo.BoundingBox, distribution Spatial
 	var latitudeRatio, longitudeRatio float64
 	switch distribution {
 	case DistributionHotspot:
+		// 85% 的点出现在热点附近
 		if random.Float64() < 0.85 {
 			center := hotspotCenters[random.Intn(len(hotspotCenters))]
 			latitudeRatio = center.latitudeRatio + random.NormFloat64()*0.035
@@ -255,6 +285,7 @@ func clampUnit(value float64) float64 {
 
 // mix64 is the SplitMix64 finalizer. It provides stable domain-derived seeds
 // and a one-to-one mapping for deterministic order IDs.
+// 输入一个 uint64，经过充分混合后得到另一个看起来高度随机的 uint64
 func mix64(value uint64) uint64 {
 	value ^= value >> 30
 	value *= 0xbf58476d1ce4e5b9
