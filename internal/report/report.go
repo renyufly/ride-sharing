@@ -12,11 +12,16 @@ import (
 	"ride-sharing/internal/model"
 )
 
+// 统计与验收模块
+// 所有订单匹配结束以后，分配得怎么样？每个骑手拿了多少单？
+// 最少的 10 个是谁？匹配距离怎么样？负载是否均衡？
+
 const (
-	bottomLimit                = 10
-	distanceHistogramMaxMeters = 50_000
+	bottomLimit                = 10   // 输出分配订单最少的后 10 名骑手
+	distanceHistogramMaxMeters = 50_000  // 距离直方图统计到 50KM
 )
 
+// 估算 每个 worker 私有统计数据大约占多少内存
 type WorkerMemoryEstimate struct {
 	RiderCountBytes        uint64 `json:"riderCountBytes"`
 	DistanceHistogramBytes uint64 `json:"distanceHistogramBytes"`
@@ -31,11 +36,13 @@ func EstimateWorkerMemory(riderCount int) WorkerMemoryEstimate {
 	}
 }
 
+// 骑手 ID + 他一共分到了多少订单
 type RiderOrderCount struct {
 	RiderUID   uint64 `json:"riderUid"`
 	OrderCount uint64 `json:"orderCount"`
 }
 
+// 最终成绩单
 type Summary struct {
 	AssignmentCount           uint64            `json:"assignmentCount"`
 	RiderOrderCountSum        uint64            `json:"riderOrderCountSum"`
@@ -53,6 +60,7 @@ type Summary struct {
 	DistanceHistogramOverflow uint64            `json:"distanceHistogramOverflow"`
 }
 
+// 统计累加器
 type Accumulator struct {
 	riderIndex                map[uint64]int
 	riderUIDs                 []uint64
@@ -87,17 +95,20 @@ func New(riders []model.Rider) (*Accumulator, error) {
 
 // Fork creates an empty worker-owned accumulator that shares only the
 // immutable UID-to-index map. Counts and distance metrics remain private.
+// 并发：每一个 worker 有自己的统计器
+// 线程/协程本地统计 + 最终归并
 func (a *Accumulator) Fork() *Accumulator {
 	return &Accumulator{
-		riderIndex:        a.riderIndex,
+		riderIndex:        a.riderIndex,  // 只读数据，可安全共享
 		riderUIDs:         a.riderUIDs,
-		riderCounts:       make([]uint64, len(a.riderCounts)),
+		riderCounts:       make([]uint64, len(a.riderCounts)),  // 每个worker要创建自己的local
 		distanceHistogram: make([]uint64, len(a.distanceHistogram)),
 	}
 }
 
 // Observe records one final assignment. It performs the only square root in
 // the matching/reporting path, after the winning rider has been selected.
+// 每完成一单匹配就调用一次，开始统计
 func (a *Accumulator) Observe(assignment model.Assignment) error {
 	index, exists := a.riderIndex[assignment.RiderUID]
 	if !exists {
@@ -108,6 +119,8 @@ func (a *Accumulator) Observe(assignment model.Assignment) error {
 	}
 
 	distanceMeters := math.Sqrt(assignment.DistanceSquaredMeters)
+
+	// 使用整数进行确定性的累计，避免大量浮点加法因执行/归并顺序不同产生微小差异
 	distanceMicrometers := math.Round(distanceMeters * 1_000_000)
 	if distanceMicrometers > float64(^uint64(0)-a.distanceSumMicrometers) {
 		return fmt.Errorf("assignment distance sum overflows uint64 micrometers")
@@ -132,6 +145,7 @@ func (a *Accumulator) Observe(assignment model.Assignment) error {
 // accumulators must have been created from the same ordered rider set. The
 // caller must not mutate source concurrently and should treat it as handed off
 // after this call.
+// 把多个 worker 的结果合起来
 func (a *Accumulator) Merge(source *Accumulator) error {
 	if source == nil {
 		return errors.New("cannot merge a nil accumulator")
@@ -162,7 +176,9 @@ func (a *Accumulator) Merge(source *Accumulator) error {
 	return nil
 }
 
+// 生成最终报告
 func (a *Accumulator) Summary() Summary {
+	// 均值
 	mean := float64(a.assignmentCount) / float64(len(a.riderCounts))
 	minOrders := a.riderCounts[0]
 	var maxOrders uint64
@@ -171,14 +187,17 @@ func (a *Accumulator) Summary() Summary {
 	zeroRiders := 0
 	riderCounts := make([]RiderOrderCount, len(a.riderCounts))
 
+	// 遍历所有骑手
 	for index, count := range a.riderCounts {
 		riderCounts[index] = RiderOrderCount{RiderUID: a.riderUIDs[index], OrderCount: count}
-		countSum += count
+		countSum += count // 订单总数
+
 		if count == 0 {
+			// 有多少骑手完全没有订单
 			zeroRiders++
 		}
 		if count < minOrders {
-			minOrders = count
+			minOrders = count  // 最小订单数
 		}
 		if count > maxOrders {
 			maxOrders = count
@@ -187,14 +206,17 @@ func (a *Accumulator) Summary() Summary {
 		squaredDeviationSum += difference * difference
 	}
 
+	// 方差越大，订单分配越不均衡
 	variance := squaredDeviationSum / float64(len(a.riderCounts))
 	stdDev := math.Sqrt(variance)
 	coefficientOfVariation := 0.0
 	if mean != 0 {
+		// 变异系数（CV）：标准差相对于平均值有多大
 		coefficientOfVariation = stdDev / mean
 	}
 	averageDistance := 0.0
 	if a.assignmentCount != 0 {
+		// 平均匹配距离
 		averageDistance = float64(a.distanceSumMicrometers) / 1_000_000 / float64(a.assignmentCount)
 	}
 
@@ -216,12 +238,16 @@ func (a *Accumulator) Summary() Summary {
 	}
 }
 
+// P95：统计约 95% 的订单，其匹配骑手距离不超过x m
+// 使用的是 ceil(distance) 的 1 米桶，所以 P95 是一个按米离散后的近似分位数
 func (a *Accumulator) percentile95() float64 {
 	if a.assignmentCount == 0 {
 		return 0
 	}
 	targetRank := uint64(math.Ceil(float64(a.assignmentCount) * 0.95))
 	var cumulative uint64
+
+	// 从最近的距离桶开始累计
 	for bucket, count := range a.distanceHistogram {
 		cumulative += count
 		if cumulative >= targetRank {
@@ -233,6 +259,11 @@ func (a *Accumulator) percentile95() float64 {
 	return a.maxDistanceMeters
 }
 
+// 寻找分配订单最少的后 10 名骑手
+// 如果是所有骑手排序，是O(N log N)
+// 这里用 container/heap 维护一个最多只有：10 个元素的heap
+// O(N log10) == O(N)
+// 找最小 K 个 → 维护大小为 K 的max-heap
 func bottomRiders(riders []RiderOrderCount, limit int) []RiderOrderCount {
 	if limit > len(riders) {
 		limit = len(riders)
@@ -257,14 +288,19 @@ func bottomRiders(riders []RiderOrderCount, limit int) []RiderOrderCount {
 }
 
 func riderLess(first, second RiderOrderCount) bool {
+	// 订单少的优先
 	if first.OrderCount != second.OrderCount {
 		return first.OrderCount < second.OrderCount
 	}
+	// UID 小的优先
 	return first.RiderUID < second.RiderUID
 }
 
 // maxRiderHeap keeps the worst currently retained Bottom 10 candidate at the
 // root: higher order count first, then higher UID.
+// 使用max-heap
+// 因为默认heap的顶是这 10 个里面最差的那个，也就是订单数最大的那个
+// 所以 找最小 K 个 → 维护大小为 K 的最大堆
 type maxRiderHeap []RiderOrderCount
 
 func (h maxRiderHeap) Len() int { return len(h) }
