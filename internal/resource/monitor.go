@@ -9,27 +9,33 @@ import (
 	"time"
 )
 
+// 资源监控器：在 2 核 4GB 的资源限制下，这个程序到底消耗了多少资源 (旁路监控组件)
+// 匹配程序运行期间，定期给 Go Runtime 拍“资源快照”，
+// 最后统计这次匹配任务用了多少堆内存、发生多少次内存分配、
+// 触发多少次 GC、GC 暂停多久，以及最多出现多少个 goroutine
+
+// 一次测试运行结束以后，资源监控器输出的最终统计结果
 type Stats struct {
-	SampleInterval       string `json:"sampleInterval"`
+	SampleInterval       string `json:"sampleInterval"`   // 采样间隔
 	ElapsedNs            int64  `json:"elapsedNs"`
-	Samples              uint64 `json:"samples"`
+	Samples              uint64 `json:"samples"`    // 采样次数
 	StartHeapAllocBytes  uint64 `json:"startHeapAllocBytes"`
 	EndHeapAllocBytes    uint64 `json:"endHeapAllocBytes"`
-	PeakHeapAllocBytes   uint64 `json:"peakHeapAllocBytes"`
-	PeakHeapInuseBytes   uint64 `json:"peakHeapInuseBytes"`
+	PeakHeapAllocBytes   uint64 `json:"peakHeapAllocBytes"`  // 运行过程中 Go 堆中“当前存活对象”最高占用了多少空间
+	PeakHeapInuseBytes   uint64 `json:"peakHeapInuseBytes"`  // Go Runtime 已经划给 Heap 使用的内存区域
 	PeakRuntimeSysBytes  uint64 `json:"peakRuntimeSysBytes"`
-	TotalAllocDeltaBytes uint64 `json:"totalAllocDeltaBytes"`
+	TotalAllocDeltaBytes uint64 `json:"totalAllocDeltaBytes"`  // 整个运行过程中累计申请了多少堆内存 (申请后可以释放)
 	MallocsDelta         uint64 `json:"mallocsDelta"`
 	FreesDelta           uint64 `json:"freesDelta"`
-	NumGCDelta           uint32 `json:"numGCDelta"`
+	NumGCDelta           uint32 `json:"numGCDelta"`  // 一共触发多少次 GC
 	GCPauseDeltaNs       uint64 `json:"gcPauseDeltaNs"`
-	PeakGoroutines       int    `json:"peakGoroutines"`
+	PeakGoroutines       int    `json:"peakGoroutines"`  // 整个运行期间观测到的最大 goroutine 数量
 }
 
 type Monitor struct {
 	interval time.Duration
 	started  time.Time
-	start    runtime.MemStats
+	start    runtime.MemStats  // 程序开始监控时的 Runtime 快照
 	stop     chan struct{}
 	done     sync.WaitGroup
 	stopOnce sync.Once
