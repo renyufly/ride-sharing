@@ -90,7 +90,7 @@ func TestArrivalModels(t *testing.T) {
 	window := 10 * time.Second
 
 	uniform := readOrdersInWindow(t, generator, 6, window, ArrivalUniformWindow)
-	if uniform[0].PlannedArrivalNs != 0 || uniform[len(uniform)-1].PlannedArrivalNs != window.Nanoseconds() {
+	if uniform[0].PlannedArrivalNs != 0 || uniform[len(uniform)-1].PlannedArrivalNs > window.Nanoseconds() {
 		t.Fatalf("uniform arrivals = first %d, last %d", uniform[0].PlannedArrivalNs, uniform[len(uniform)-1].PlannedArrivalNs)
 	}
 	assertNonDecreasing(t, uniform)

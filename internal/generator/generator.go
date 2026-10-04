@@ -5,6 +5,7 @@ package generator
 import (
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"time"
 
@@ -198,25 +199,78 @@ func (s *OrderStream) Next() (model.Order, bool, error) {
 	return order, true, nil
 }
 
+// 制定订单的到达时间表
+// 根据“当前是第几个订单”、订单总数、总到达时间窗口以及到达模型，计算这个订单应该在程序启动后的第多久出现
+// sequence-当前订单编号 total-总订单数量 window-所有订单计划到达的总时间窗口
+// 返回值-当前订单相对于开始时刻的计划到达时间
 func plannedArrival(sequence, total uint64, window time.Duration, arrival ArrivalModel) time.Duration {
 	if arrival == ArrivalUnbounded || total <= 1 || window == 0 {
+		// unbounded：所有订单立即生产，计划时间为0
 		return 0
 	}
-	if sequence == total-1 {
-		return window
+
+	switch arrival {
+	case ArrivalUniformWindow:
+		return uniformArrival(sequence, total, window)
+
+	case ArrivalFrontLoadedBurst:
+		return burstArrival(sequence, total, window)
+
+	default:
+		return 0
 	}
 
-	position := float64(sequence) / float64(total-1)
-	if arrival == ArrivalFrontLoadedBurst {
-		// Schedule 80% of orders in the first 20% of the window, then spread
-		// the remaining 20% across the final 80%.
-		if position <= 0.8 {
-			position = position * 0.25
-		} else {
-			position = 0.2 + (position-0.8)*4
-		}
+	
+}
+
+func uniformArrival(sequence, total uint64, window time.Duration) time.Duration {
+	// 时间均匀分配给每个订单
+	return slotOffset(sequence, total, window)
+}
+
+func burstArrival(sequence, total uint64, window time.Duration) time.Duration {
+	if total == 0{
+		return 0
 	}
-	return time.Duration(float64(window) * position)
+	
+	// 80%
+	burstOrderCount := uint64(math.Round(float64(total) * 0.8)) 
+	
+	// 防止上下溢出
+	if burstOrderCount < 1{
+		burstOrderCount = 1
+	} else if burstOrderCount > total {
+		burstOrderCount = total
+	}
+	
+	normalOrderCount := total - burstOrderCount // 20%
+
+	burstWindow := window / 5  // 前20%时间
+	normalWindow := window - burstWindow
+
+	if sequence < uint64(burstOrderCount) {
+		return slotOffset(sequence, burstOrderCount, burstWindow)
+	}
+
+	if normalOrderCount == 0 {
+		return slotOffset(sequence, burstOrderCount, burstWindow)
+	}
+
+	// 剩余的都是后20%
+	sequence -= burstOrderCount
+	return burstWindow + slotOffset(sequence, normalOrderCount, normalWindow)
+}
+
+// 在当前时间window里依据指定的订单总数全部平均分配的时间戳
+func slotOffset(index, count uint64, duration time.Duration) time.Duration {
+	if count <= 1{
+		return 0
+	}
+
+	// ( 持续总时间 ÷ 总数 ) × index
+	remainder := uint64(duration) % count
+	offset := uint64(duration) / count * index + uint64(index * remainder / count)
+	return time.Duration(offset)
 }
 
 func ValidateArrivalModel(arrival ArrivalModel) error {

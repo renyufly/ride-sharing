@@ -30,6 +30,8 @@ type Stats struct {
 	NumGCDelta           uint32 `json:"numGCDelta"`  // 一共触发多少次 GC
 	GCPauseDeltaNs       uint64 `json:"gcPauseDeltaNs"`
 	PeakGoroutines       int    `json:"peakGoroutines"`  // 整个运行期间观测到的最大 goroutine 数量
+	PeakStackInuseBytes  uint64 `json:"PeakStackInuseBytes"`  // 当前正在使用的 goroutine 栈区域
+	PeakStackSysBytes	 uint64 `json:"PeakStackSysBytes"`  // Runtime 从系统获得的栈内存
 }
 
 type Monitor struct {
@@ -75,6 +77,10 @@ func (m *Monitor) sample() {
 	peakHeapInuse := m.start.HeapInuse
 	peakSys := m.start.Sys
 	peakGoroutines := runtime.NumGoroutine()
+
+	peakStackInuse := m.start.StackInuse
+	peakStackSys := m.start.StackSys
+
 	var samples uint64 = 1
 	var end runtime.MemStats
 
@@ -85,6 +91,9 @@ func (m *Monitor) sample() {
 		peakHeapInuse = max(peakHeapInuse, end.HeapInuse)
 		peakSys = max(peakSys, end.Sys)
 		peakGoroutines = max(peakGoroutines, runtime.NumGoroutine())
+	
+		peakStackInuse = max(peakStackInuse, end.StackInuse)
+		peakStackSys = max(peakStackSys, end.StackSys)
 	}
 
 	for {

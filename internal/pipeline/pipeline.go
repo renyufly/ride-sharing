@@ -20,6 +20,9 @@ import (
 // 负责用 goroutine + channel 串起来，并尽可能高效地跑完所有订单
 // 题目要求的 Go 协程 + CSP 并发模型最核心的一层
 
+// pipeline.go 不只是“策略 A 文件”，其中还包含一些策略 A/B 共用的类型和函数
+// 策略A-严格选择最近骑手
+
 // pipeline 不关心具体实现
 type OrderSource interface {
 	Next() (model.Order, bool, error)
@@ -36,6 +39,7 @@ type Options struct {
 	ChannelCapacity int  // 限制 channel 最多缓存多少个 batch (一个 bounded channel)
 	ExpectedOrders  uint64
 	PreviewSize     int
+	ObservationWindow time.Duration // 从 Pipeline 开始运行,观察和统计前 X 秒运行的订单数量的时间范围
 }
 
 // 启动之前检查参数
@@ -62,8 +66,8 @@ func (o Options) Validate() error {
 type Result struct {
 	GeneratedOrders      uint64             `json:"generatedOrders"`
 	AdmittedOrders       uint64             `json:"admittedOrders"`
-	CompletedOrders      uint64             `json:"completedOrders"`
-	UnfinishedOrders     uint64             `json:"unfinishedOrders"`
+	CompletedOrders      uint64             `json:"completedOrders"`  // 成功分配的订单
+	UnfinishedOrders     uint64             `json:"unfinishedOrders"` //  未分配，推迟 DeferredOrders
 	LastPlannedArrivalNs int64              `json:"lastPlannedArrivalNs"`
 	MaxQueueDepth        int                `json:"maxQueueDepthBatches"`
 	Performance          PerformanceMetrics `json:"performance"`
@@ -72,6 +76,15 @@ type Result struct {
 	OrderPreview         []model.Order      `json:"-"`
 	AssignmentPreview    []model.Assignment `json:"-"`
 	Report               report.Summary     `json:"report"`
+	GeneratedWithinWindow uint64    		`json:"generatedWithinWindow"`
+	AdmittedWithinWindow  uint64 			`json:"admittedWithinWindow"`
+	CompletedWithinWindow uint64            `json:"completedWithinWindow"`
+	DeferredOrders      uint64				`json:"deferredOrders"`
+	DeferredByCapacity  uint64				`json:"deferredByCapacity"`
+	DeferredByWindow    uint64				`json:"deferredByWindow"`
+	DeferredPreview     []DeferredOrder		`json:"deferredPreview"`
+	MaxOrdersPerRider   int 				`json:"maxOrdersPerRider"`
+	CapacityFilteredCandidates uint64       `json:"capacityFilteredCandidates"`
 }
 
 type StrategyMetrics struct {
@@ -94,6 +107,14 @@ type PerformanceMetrics struct {
 	AdmissionDelay         LatencySummary `json:"admissionDelay"`
 	QueueAndMatchLatency   LatencySummary `json:"queueAndMatchLatency"`
 	EndToEndLatency        LatencySummary `json:"endToEndLatency"`
+	AlgorithmPerformanceMetrics AlgorithmPerformanceMetrics `json:"algorithmPerformanceMetrics"`
+}
+
+type AlgorithmPerformanceMetrics struct {
+	NearestSearch       LatencySummary   // 策略 A 只填写 NearestSearch
+    CandidateSearch     LatencySummary
+    AssignmentDecision  LatencySummary
+    AlgorithmCompute    LatencySummary
 }
 
 type RunError struct {
@@ -146,7 +167,7 @@ func (e *producerPanicError) Error() string {
 }
 
 type producerResult struct {
-	generated            uint64
+	generated            uint64   // 已生成订单数量
 	admitted             uint64
 	lastPlannedArrivalNs int64
 	maxQueueDepth        int
@@ -154,6 +175,8 @@ type producerResult struct {
 	admissionLatency     latencyHistogram
 	preview              []model.Order
 	err                  error
+	generatedWithinWindow uint64  // 指定时间窗口内成功生成的订单数量
+	admittedWithinWindow uint64
 }
 
 type workerResult struct {
@@ -165,6 +188,8 @@ type workerResult struct {
 	queueAndMatchLatency latencyHistogram
 	endToEndLatency      latencyHistogram
 	err                  error
+	completedWithinWindow uint64
+	nearestSearchLatency latencyHistogram
 }
 
 type admittedBatch struct {
@@ -234,7 +259,7 @@ func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []mode
 	for workerID := 0; workerID < options.Workers; workerID++ {
 		go func() {
 			defer workers.Done()
-			work(runContext, cancel, runStarted, workerID, matcher, batchChannel, bufferPool, workerReporters[workerID], options.PreviewSize, workerResults)
+			work(runContext, cancel, runStarted, workerID, matcher, batchChannel, bufferPool, workerReporters[workerID], options.PreviewSize, workerResults, options)
 		}()
 	}
 
@@ -259,16 +284,31 @@ func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []mode
 		WorkerCompleted:      make([]uint64, options.Workers),
 		OrderPreview:         append([]model.Order(nil), producerState.preview...),
 	}
+
+	result.GeneratedWithinWindow = producerState.generatedWithinWindow
+	result.AdmittedWithinWindow = producerState.admittedWithinWindow
+
 	queueAndMatchLatency := latencyHistogram{}
 	endToEndLatency := latencyHistogram{}
+
+	nearestSearchLatency := latencyHistogram{}
+
 	lastCompletionNs := int64(0)
 	var workerError error
+
+	// 遍历所有 workerResult
 	for _, state := range states {
-		result.CompletedOrders += state.completed
+		result.CompletedOrders += state.completed  // 总的完成分配订单数
+		result.CompletedWithinWindow += state.completedWithinWindow 
+
 		result.WorkerCompleted[state.workerID] = state.completed
 		result.AssignmentPreview = append(result.AssignmentPreview, state.preview...)
 		queueAndMatchLatency.merge(&state.queueAndMatchLatency)
 		endToEndLatency.merge(&state.endToEndLatency)
+
+		//
+		nearestSearchLatency.merge(&state.nearestSearchLatency)
+
 		if state.lastCompletionNs > lastCompletionNs {
 			lastCompletionNs = state.lastCompletionNs
 		}
@@ -288,6 +328,9 @@ func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []mode
 	result.Report = mergedReporter.Summary()
 	result.UnfinishedOrders = unfinished(options.ExpectedOrders, result.CompletedOrders)
 	result.Performance = buildPerformanceMetrics(producerState, lastCompletionNs, queueAndMatchLatency, endToEndLatency)
+
+	//
+	result.Performance.AlgorithmPerformanceMetrics.NearestSearch = nearestSearchLatency.summary()
 
 	cause := workerError
 	if cause == nil {
@@ -378,7 +421,15 @@ func produce(
 				break
 			}
 			state.generated++  // source.Next() 已经生成出来
+			
+			// Generator 完成订单对象创建的时间
+			generatedAt := time.Since(start)
+			if options.ObservationWindow > 0 && generatedAt < options.ObservationWindow{
+				state.generatedWithinWindow += 1
+			}
+
 			state.lastPlannedArrivalNs = order.PlannedArrivalNs
+
 			if uint64(len(state.preview)) < uint64(options.PreviewSize) {
 				state.preview = append(state.preview, order)
 			}
@@ -395,6 +446,7 @@ func produce(
 			case batches <- ownedBatch:
 				// batch 满了以后发送
 				admittedNs := time.Since(start).Nanoseconds()
+				
 				ownedBatch.admittedNs.Store(admittedNs + 1)
 				for _, order := range ownedBatch.orders {
 					state.admissionLatency.observe(admittedNs - order.PlannedArrivalNs)
@@ -404,6 +456,12 @@ func produce(
 				ownedBatch = nil
 				state.admitted += uint64(batchSize) // 已经成功进入 worker pipeline
 				state.lastAdmissionNs = admittedNs
+
+				// 整个 Batch 使用同一个准入时间
+				if admittedNs < options.ObservationWindow.Nanoseconds() {
+					state.admittedWithinWindow += uint64(batchSize)
+				}
+
 				if queueDepth := len(batches); queueDepth > state.maxQueueDepth {
 					state.maxQueueDepth = queueDepth
 				}
@@ -430,6 +488,7 @@ func work(
 	reporter *report.Accumulator,
 	previewSize int,
 	results chan<- workerResult,
+	options Options,
 ) {
 	state := workerResult{
 		workerID: workerID,
@@ -487,7 +546,11 @@ func work(
 			}
 			currentOrder = ownedBatch.orders[index]
 			hasCurrentOrder = true
+
+			searchStarted := time.Now()
+
 			// 注意：pipeline 本身没有最近骑手搜索算法
+			// Matcher 成功
 			assignment, err := matcher.Match(currentOrder)
 			if err != nil {
 				state.err = fmt.Errorf(
@@ -501,7 +564,9 @@ func work(
 				return
 			}
 
-			// 匹配之后立即统计
+			searchDuration := time.Since(searchStarted)
+
+			// Reporter 成功记录 Assignment
 			if err := reporter.Observe(assignment); err != nil {
 				state.err = fmt.Errorf(
 					"worker %d record order ID %d sequence %d: %w",
@@ -513,7 +578,17 @@ func work(
 				cancel()
 				return
 			}
-			state.completed++
+
+			state.completed++  // 已成功匹配的订单数量
+
+			// 纯最近邻搜索时间
+			state.nearestSearchLatency.observe(searchDuration.Nanoseconds())
+
+			elapsed := time.Since(start)
+			if elapsed < options.ObservationWindow {
+				state.completedWithinWindow += 1 //
+			}
+
 			completedAt := time.Now()
 			state.lastCompletionNs = completedAt.Sub(start).Nanoseconds()
 			state.queueAndMatchLatency.observe(state.lastCompletionNs - admittedNs)

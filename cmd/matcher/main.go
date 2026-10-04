@@ -45,8 +45,11 @@ type dataOutput struct {
 	OrderSeed            int64                            `json:"orderSeed"`
 	GeneratedRiderCount  int                              `json:"generatedRiderCount"`
 	GeneratedOrderCount  int                              `json:"generatedOrderCount"`
+	GeneratedWithinWindow int							  `json:"generatedWithinWindow"`
 	AdmittedOrderCount   int                              `json:"admittedOrderCount"`
-	MatchedOrderCount    int                              `json:"matchedOrderCount"`
+	AdmittedWithinWindow int 							  `json:"admittedWithinWindow"`
+	CompletedOrderCount  int                              `json:"completedOrderCount"`
+	CompletedWithinWindow int 							  `json:"completedWithinWindow"`
 	UnfinishedOrderCount int                              `json:"unfinishedOrderCount"`
 	LastPlannedArrivalNs int64                            `json:"lastPlannedArrivalNs"`
 	MaxQueueDepth        int                              `json:"maxQueueDepthBatches"`
@@ -63,6 +66,7 @@ type dataOutput struct {
 	AssignmentPreview    []assignmentOutput               `json:"assignmentPreview"`
 	Report               report.Summary                   `json:"report"`
 	StrategyDetails      *pipeline.StrategyMetrics        `json:"strategyDetails,omitempty"`
+	ReadableSummary		 readableSummary				  `json:"readableSummary"`
 }
 
 type boundsOutput struct {
@@ -116,6 +120,17 @@ type timingOutput struct {
 	PipelineNs        int64   `json:"pipelineNs"`
 	TotalNs           int64   `json:"totalNs"`
 	ThroughputPerSec  float64 `json:"throughputOrdersPerSecond"`
+}
+
+type readableSummary struct {
+	Workload    string `json:"workload"`
+    Result      string `json:"result"`
+    Strategy    string	`json:"strategy"`
+    Timing      string	`json:"timing"`
+    Load        string	`json:"load"`
+    Distance    string	`json:"distance"`
+	Algorithm   string  `json:"algorithm"`
+	Resources   string  `json:"resources"`
 }
 
 func main() {
@@ -192,6 +207,7 @@ func main() {
 		ChannelCapacity: cfg.ChannelCapacity,
 		ExpectedOrders:  uint64(cfg.OrderCount),
 		PreviewSize:     previewSize,
+		ObservationWindow: cfg.ArrivalWindow,
 	}
 
 	// 提前估算内存
@@ -225,6 +241,8 @@ func main() {
 			Options:                pipelineOptions,
 			TopK:                   cfg.TopK,
 			MaxExtraDistanceMeters: cfg.MaxExtraDistanceMeters,
+			MaxOrdersPerRider: cfg.MaxOrdersPerRider,
+			AssignmentWindow: cfg.ArrivalWindow,
 		}
 		estimate, estimateErr := pipeline.EstimateBalancedMemory(cfg.RiderCount, balancedOptions)
 		if estimateErr != nil {
@@ -266,6 +284,135 @@ func main() {
 		message = "all orders assigned deterministically through the load-aware bounded CSP pipeline"
 	}
 
+	// 时间值转换
+	lastPlannedArrivalText := time.Duration(pipelineResult.LastPlannedArrivalNs).String()
+	pipelineDurationText := pipelineDuration.String()
+	endToEndP99Text := time.Duration(pipelineResult.Performance.EndToEndLatency.P99Ns).String()
+	drainText := time.Duration(pipelineResult.Performance.DrainAfterWindowNs).String()
+
+	// 拼接输出的字符串
+	workloadText := fmt.Sprintf(
+		"对于%d 名骑手, 总共生成%d 个订单，且订单按 %s 生成订单模型, 需在 %v 的时间窗口内生成",
+		cfg.RiderCount,
+		cfg.OrderCount,
+		cfg.ArrivalModel,
+		cfg.ArrivalWindow,
+	)
+
+	resultText := fmt.Sprintf(
+		"在ArrivalWindow= %s 内, 生成订单: %d/%d，接收: %d/%d，被成功分配给骑手完成的订单数: %d/%d；时间窗口期结束最终未完成: %d",
+		cfg.ArrivalWindow.String(),
+		pipelineResult.GeneratedWithinWindow,
+		pipelineResult.GeneratedOrders,
+		pipelineResult.AdmittedWithinWindow,
+		pipelineResult.AdmittedOrders,
+		pipelineResult.CompletedWithinWindow,
+		pipelineResult.CompletedOrders,
+		pipelineResult.UnfinishedOrders,
+	)
+
+	// Algorithm = “怎么快速找候选Rider？”
+	// Strategy = “找到候选骑手以后，怎么决定给谁？”
+	strategyText := fmt.Sprintf(
+		"默认策略A-最近骑手分配策略, 使用 %s 算法寻找候选骑手",
+		cfg.Algorithm,
+	)
+
+	algorithmText := fmt.Sprintf(
+		"策略A-最近邻搜索分配骑手算法用时 P50/P95/P99/Max=%s/%s/%s/%s",
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.NearestSearch.P50Ns).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.NearestSearch.P95Ns).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.NearestSearch.P99Ns).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.NearestSearch.MaxNs).String(),
+	)
+
+	if cfg.Strategy == config.StrategyBalanced {
+		strategyText = fmt.Sprintf(
+		"策略B-负载均衡骑手分配, 使用 %s 算法寻找候选骑手，Top-K=%d，最大额外距离=%.2fm",
+		cfg.Algorithm,
+		cfg.TopK,
+		cfg.MaxExtraDistanceMeters,
+	)
+
+		algorithmText = fmt.Sprintf(
+		"策略B-负载均衡分配骑手, Top-K搜索骑手(使用KD-Tree) P50/P95/P99/Max=%s/%s/%s/%s, 最终决策选出最终骑手 P50/P95/P99/Max=%s/%s/%s/%s, 纯算法总耗时 P50/P95/P99/Max=%s/%s/%s/%s",
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.CandidateSearch.P50Ns).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.CandidateSearch.P95Ns).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.CandidateSearch.P99Ns).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.CandidateSearch.MaxNs).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AssignmentDecision.P50Ns).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AssignmentDecision.P95Ns).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AssignmentDecision.P99Ns).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AssignmentDecision.MaxNs).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AlgorithmCompute.P50Ns).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AlgorithmCompute.P95Ns).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AlgorithmCompute.P99Ns).String(),
+		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AlgorithmCompute.MaxNs).String(),
+	)
+	}
+
+	// Pipeline包含时间：
+	// Producer 生成订单。
+	// 按 Arrival 模型等待。
+	// Batch/Channel 传输。
+	// Candidate Worker 搜索 Top-K。
+	// Coordinator 重排和选择骑手。
+	// 报告统计。
+	// Worker 结束和结果归并
+	timingText := fmt.Sprintf(
+		"最后的一个订单的生成时间=%s，整个Pipeline时间=%s (非纯匹配算法耗时)，端到端P99=%s (99%%的订单，从计划生成开始，到完成匹配所花的时间不超过) \n" +
+		"最后一笔订单生成后系统还花了多久才完成全部订单=%s, 最后一个 Batch 在 Pipeline 启动后的什么时间成功写入匹配 Channel=%s \n" + 
+		"整个系统截止到最后一单完成总共时间=%s, 主程序全部总时间=%s", 
+		lastPlannedArrivalText,
+		pipelineDurationText,
+		endToEndP99Text,
+		drainText,
+		time.Duration(pipelineResult.Performance.ActualInjectionNs).String(),
+		time.Duration(pipelineResult.Performance.TotalRunNs).String(),
+		time.Duration(totalDuration.Nanoseconds()).String(),
+	)
+	
+	loadText := fmt.Sprintf(
+		"骑手额度=%d (0表示不限额), 主窗口内骑手被分配订单数量 min/mean/max=%d/%.2f/%d，零订单的骑手数量=%d，Coefficient Of Variation=%.4f" +
+		"因骑手满额度而被defer的订单数=%d, 超时未分配而被defer的订单数=%d",
+		pipelineResult.MaxOrdersPerRider,
+		pipelineResult.Report.MinOrders,
+		pipelineResult.Report.MeanOrders,
+		pipelineResult.Report.MaxOrders,
+		pipelineResult.Report.ZeroRiderCount,
+		pipelineResult.Report.CoefficientOfVariation,
+		pipelineResult.DeferredByCapacity,
+		pipelineResult.DeferredByWindow,
+
+	)
+
+	distanceText := fmt.Sprintf(
+		"平均匹配距离=%.2fm，P95=%.2fm，最大=%.2fm",
+		pipelineResult.Report.AverageDistanceMeters,
+		pipelineResult.Report.P95DistanceMeters,
+		pipelineResult.Report.MaxDistanceMeters,
+	)
+
+	// Resource
+	monitorTime := time.Duration(resourceStats.ElapsedNs)
+	gcPauseTime:= time.Duration(resourceStats.GCPauseDeltaNs)
+
+	resourceText := fmt.Sprintf(
+		"资源监控时长=%s，采样=%d次（间隔%s）；"+
+		"Go堆峰值=%dKB，HeapInuse峰值=%dKB，"+
+		"Runtime Sys峰值=%dKB；"+
+		"累计分配=%dKB，GC=%d次，GC暂停=%s，"+
+		"Goroutine峰值=%d，GOMAXPROCS=%d",
+		monitorTime, resourceStats.Samples, resourceStats.SampleInterval,
+		resourceStats.PeakHeapAllocBytes/1024,
+		resourceStats.PeakHeapInuseBytes/1024,
+		resourceStats.PeakRuntimeSysBytes/1024,
+		resourceStats.TotalAllocDeltaBytes/1024,
+		resourceStats.NumGCDelta, gcPauseTime,
+		resourceStats.PeakGoroutines, runtime.GOMAXPROCS(0),
+	)
+
+
 	// 把之前计算出来的结果装进一个 JSON DTO
 	output := startupOutput{
 		Phase:   phase,
@@ -284,8 +431,11 @@ func main() {
 			OrderSeed:            seeds.Order,
 			GeneratedRiderCount:  len(riders),
 			GeneratedOrderCount:  int(pipelineResult.GeneratedOrders),
+			GeneratedWithinWindow: int(pipelineResult.GeneratedWithinWindow),
 			AdmittedOrderCount:   int(pipelineResult.AdmittedOrders),
-			MatchedOrderCount:    int(pipelineResult.CompletedOrders),
+			AdmittedWithinWindow: int(pipelineResult.AdmittedWithinWindow),
+			CompletedOrderCount:  int(pipelineResult.CompletedOrders),
+			CompletedWithinWindow: int(pipelineResult.CompletedWithinWindow),
 			UnfinishedOrderCount: int(pipelineResult.UnfinishedOrders),
 			LastPlannedArrivalNs: pipelineResult.LastPlannedArrivalNs,
 			MaxQueueDepth:        pipelineResult.MaxQueueDepth,
@@ -308,6 +458,16 @@ func main() {
 			AssignmentPreview: displayAssignments(pipelineResult.AssignmentPreview),
 			Report:            pipelineResult.Report,
 			StrategyDetails:   pipelineResult.StrategyDetails,
+			ReadableSummary: readableSummary{
+				Workload: workloadText,
+				Result: resultText,
+				Strategy: strategyText,
+				Timing: timingText,
+				Load: loadText,
+				Distance: distanceText,
+				Algorithm: algorithmText,
+				Resources: resourceText,
+			},
 		},
 	}
 

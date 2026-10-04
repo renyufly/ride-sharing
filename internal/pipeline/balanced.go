@@ -33,6 +33,8 @@ type BalancedOptions struct {
 	Options
 	TopK                   int  // 每个订单先找最近的 K 个骑手
 	MaxExtraDistanceMeters float64  // 允许参与负载均衡的最远距离
+	MaxOrdersPerRider      int  // 每个骑手的订单上限
+	AssignmentWindow 	   time.Duration  // 主分配阶段时长 == 订单总生成窗口arrival window
 }
 
 func (o BalancedOptions) Validate(riderCount int) error {
@@ -137,6 +139,14 @@ type candidateResult struct {
 	order      model.Order
 	admittedNs int64   // 订单进入 Pipeline 的时间
 	candidates []matchrule.Candidate  // Coordinator 根据这里的 candidates 决定最终骑手
+	candidateSearchNs int64  // 当前订单执行 TopKInto 的纯计算时间
+}
+
+type balancedSelection struct {
+	assignment       model.Assignment
+	riderIndex       int
+	assigned         bool   // true：成功找到骑手 false：候选骑手都达到额度
+	capacityFiltered uint64 // 本单因为满额而跳过了多少名候选骑手
 }
 
 // 一个 Batch 包含多个订单
@@ -156,7 +166,7 @@ type candidateWorkerResult struct {
 }
 
 type coordinatorResult struct {
-	completed         uint64
+	completed         uint64  // 已完成分配的订单数量
 	lastCompletionNs  int64
 	maxReorderDepth   int
 	preview           []model.Assignment
@@ -164,6 +174,15 @@ type coordinatorResult struct {
 	queueMatchLatency latencyHistogram
 	endToEndLatency   latencyHistogram
 	err               error
+	completedWithinWindow uint64  // 指定时间窗口内完成分配的订单数量
+	candidateSearchLatency latencyHistogram
+	assignmentDecisionLatency latencyHistogram
+	algorithmComputeLatency latencyHistogram
+	deferred                 uint64
+	deferredByCapacity       uint64
+	deferredByWindow         uint64
+	deferredPreview          []DeferredOrder
+	capacityFiltered         uint64
 }
 
 type CandidatePanicError struct {
@@ -278,17 +297,37 @@ func RunBalanced(
 			MaxReorderDepth:          coordinatorState.maxReorderDepth,
 			CandidateWorkerCompleted: append([]uint64(nil), workerCompleted...),
 		},
+		DeferredOrders: coordinatorState.deferred,
+		DeferredByWindow: coordinatorState.deferredByWindow,
+		DeferredByCapacity: coordinatorState.deferredByCapacity,
+		DeferredPreview: coordinatorState.deferredPreview,
+		MaxOrdersPerRider: options.MaxOrdersPerRider,
+		CapacityFilteredCandidates: coordinatorState.capacityFiltered,
 	}
+
+	result.GeneratedWithinWindow = producerState.generatedWithinWindow
+	result.AdmittedWithinWindow = producerState.admittedWithinWindow
+	result.CompletedWithinWindow = coordinatorState.completedWithinWindow
+
+	//
+	candidateSearch := coordinatorState.candidateSearchLatency.summary()
+	assignmentDecision := coordinatorState.assignmentDecisionLatency.summary()
+	algorithmCompute := coordinatorState.algorithmComputeLatency.summary()
+
+	result.Performance.AlgorithmPerformanceMetrics.CandidateSearch = candidateSearch
+	result.Performance.AlgorithmPerformanceMetrics.AssignmentDecision = assignmentDecision
+	result.Performance.AlgorithmPerformanceMetrics.AlgorithmCompute = algorithmCompute
+
 
 	cause := firstNonCancellation(coordinatorState.err, workerError, producerState.err)
 	if cause == nil {
 		cause = firstError(coordinatorState.err, workerError, producerState.err)
 	}
-	if cause == nil && (result.GeneratedOrders != options.ExpectedOrders || result.AdmittedOrders != options.ExpectedOrders ||
-		result.CompletedOrders != options.ExpectedOrders || result.Report.AssignmentCount != options.ExpectedOrders ||
-		result.Report.RiderOrderCountSum != options.ExpectedOrders) {
-		cause = errors.New("balanced completion violated order-count conservation")
-	}
+	// if cause == nil && (result.GeneratedOrders != options.ExpectedOrders || result.AdmittedOrders != options.ExpectedOrders ||
+	// 	 result.Report.AssignmentCount != options.ExpectedOrders ||
+	// 	result.Report.RiderOrderCountSum != options.ExpectedOrders) {
+	// 	cause = errors.New("balanced completion violated order-count conservation")
+	// }
 	if cause != nil {
 		return result, &RunError{Cause: cause, Generated: result.GeneratedOrders, Admitted: result.AdmittedOrders, Completed: result.CompletedOrders, Expected: options.ExpectedOrders}
 	}
@@ -372,7 +411,12 @@ func produceBalanced(
 				sourceEnded = true
 				break
 			}
-			state.generated++
+			state.generated++   // 已生成的订单数量
+			generatedAt := time.Since(start)
+			if generatedAt < options.ObservationWindow {
+				state.generatedWithinWindow += 1
+			}
+
 			state.lastPlannedArrivalNs = order.PlannedArrivalNs
 			if len(state.preview) < options.PreviewSize {
 				state.preview = append(state.preview, order)
@@ -402,8 +446,17 @@ func produceBalanced(
 					state.admissionLatency.observe(admittedNs - job.order.PlannedArrivalNs)
 				}
 				owned.admittedNs.Store(admittedNs + 1)
+
+				// 读取 Batch 中订单数
 				state.admitted += uint64(len(owned.jobs))
+
+				if admittedNs < options.ObservationWindow.Nanoseconds() {
+					state.admittedWithinWindow += uint64(len(owned.jobs))
+				}
+
 				state.lastAdmissionNs = admittedNs
+
+				// 转移所有权并把 owned 设为 nil
 				owned = nil
 				if depth := len(batches); depth > state.maxQueueDepth {
 					state.maxQueueDepth = depth
@@ -476,6 +529,9 @@ func findCandidates(
 			envelope := ownedBatch.jobs[nextJob]
 			current = envelope.order
 			envelope.admittedNs = admittedNs
+
+			searchStarted := time.Now()
+
 			// 计算 Top-K
 			candidates, err := matcher.TopKInto(envelope.order, topK, envelope.candidates[:0])
 			if err != nil {
@@ -486,7 +542,13 @@ func findCandidates(
 				cancel()
 				return
 			}
+
+			searchDuration := time.Since(searchStarted)
+
 			envelope.candidates = candidates
+
+			envelope.candidateSearchNs = searchDuration.Nanoseconds()
+
 			select {
 			case results <- envelope:
 				state.count++
@@ -530,7 +592,7 @@ func coordinateBalanced(
 	output chan<- coordinatorResult,
 ) {
 	reporter, err := report.New(riders)
-	state := coordinatorResult{preview: make([]model.Assignment, 0, options.PreviewSize), reporter: reporter}
+	state := coordinatorResult{preview: make([]model.Assignment, 0, options.PreviewSize), deferredPreview: make([]DeferredOrder, 0, options.PreviewSize), reporter: reporter}
 	if err != nil {
 		state.err = fmt.Errorf("create balanced reporter: %w", err)
 		cancel()
@@ -592,62 +654,178 @@ func coordinateBalanced(
 				if !exists {
 					break
 				}
-				assignment, riderIndex, err := chooseBalanced(ready.order, ready.candidates, loads, uidIndex, options.MaxExtraDistanceMeters)
+
+				// 搜索耗时
+				state.candidateSearchLatency.observe(ready.candidateSearchNs)
+
+				decisionStarted := time.Now() //
+
+				if options.AssignmentWindow > 0 && time.Since(start) >= options.AssignmentWindow {
+					// 超时，不能分配
+					deferredAt := time.Since(start).Nanoseconds()
+
+					state.deferred += 1 //
+					state.deferredByWindow += 1
+
+					if len(state.deferredPreview) < options.PreviewSize {
+						state.deferredPreview = append(
+							state.deferredPreview, 
+							DeferredOrder{
+								Order: ready.order,
+								Reason:DeferredReasonWindowExpired,
+								DeferredAtNs: deferredAt,
+							},
+						)
+					}
+				
+					delete(pending, next)
+					next++
+					// ready.candidates清空
+					ready.candidates = ready.candidates[:0] // [:0]不是释放底层数组，而是清空内容
+					// ready放回resultPool
+					resultPool <- ready
+				
+					continue
+				}
+
+				// chooseBalanced()运行订单的骑手分配算法-完成最终骑手选择
+				balancedSelection, err := chooseBalanced(ready.order, ready.candidates, loads, uidIndex, options.MaxExtraDistanceMeters, options.MaxOrdersPerRider)
 				if err != nil {
 					state.err = err
 					cancel()
 					return
 				}
-				loads[riderIndex]++
-				if err := reporter.Observe(assignment); err != nil {
-					state.err = err
-					cancel()
-					return
+
+				// 执行决策-骑手分配 耗时
+				decisionDuration := time.Since(decisionStarted)
+				state.assignmentDecisionLatency.observe(decisionDuration.Nanoseconds())
+
+				// 每单算法总耗时
+				algorithmComputeNs := decisionDuration.Nanoseconds() + ready.candidateSearchNs
+				state.algorithmComputeLatency.observe(algorithmComputeNs)
+
+				// 累计 selection.capacityFiltered
+				state.capacityFiltered += balancedSelection.capacityFiltered
+
+				if balancedSelection.assigned == false {
+					// 全部满额度
+					deferredAt := time.Since(start).Nanoseconds()
+
+					state.deferred += 1 //
+					state.deferredByCapacity += 1
+
+					if len(state.deferredPreview) < options.PreviewSize {
+						state.deferredPreview = append(
+							state.deferredPreview, 
+							DeferredOrder{
+								Order: ready.order,
+								Reason: DeferredReasonCapacityExhausted,
+								DeferredAtNs: deferredAt,
+							},
+						)
+					}
+
+				} else {
+					loads[balancedSelection.riderIndex] ++ // 骑手订单增加
+					
+					// Reporter 成功记录 Assignment
+					if err := reporter.Observe(balancedSelection.assignment); err != nil {
+						state.err = err
+						cancel()
+						return
+					}
+					
+					completedAt := time.Now()
+					
+					state.lastCompletionNs = completedAt.Sub(start).Nanoseconds()
+					state.queueMatchLatency.observe(state.lastCompletionNs - ready.admittedNs)
+					state.endToEndLatency.observe(completedAt.Sub(start.Add(time.Duration(ready.order.PlannedArrivalNs))).Nanoseconds())
+					
+					state.completed++  // 已完成分配的订单数量
+
+					elapsed := time.Since(start)
+					if elapsed < options.ObservationWindow {
+						state.completedWithinWindow += 1 //
+					}
+
+					if balancedSelection.assignment.Sequence < uint64(options.PreviewSize) {
+						state.preview = append(state.preview, balancedSelection.assignment)
+					}
+
 				}
-				completedAt := time.Now()
-				state.lastCompletionNs = completedAt.Sub(start).Nanoseconds()
-				state.queueMatchLatency.observe(state.lastCompletionNs - ready.admittedNs)
-				state.endToEndLatency.observe(completedAt.Sub(start.Add(time.Duration(ready.order.PlannedArrivalNs))).Nanoseconds())
-				state.completed++
-				if assignment.Sequence < uint64(options.PreviewSize) {
-					state.preview = append(state.preview, assignment)
-				}
+
+				
 				delete(pending, next)
 				next++
+				// ready.candidates清空
 				ready.candidates = ready.candidates[:0] // [:0]不是释放底层数组，而是清空内容
+				// ready放回resultPool
 				resultPool <- ready
 			}
 		}
 	}
 }
 
-// 真正决定“订单给谁”
+// 在候选骑手中选择最终骑手
 func chooseBalanced(
 	order model.Order,
 	candidates []matchrule.Candidate,
 	loads []uint64,
 	uidIndex map[uint64]int,
 	maxExtraDistanceMeters float64,
-) (model.Assignment, int, error) {
+	maxOrdersPerRider int,
+) (balancedSelection, error) {
 	if len(candidates) == 0 {
-		return model.Assignment{}, 0, errors.New("balanced candidate list is empty")
+		return balancedSelection{}, errors.New("balanced candidate list is empty")
 	}
 
+	// 使用当前第一个候选骑手计算最近距离
+	// 即使第一个骑手已经满额，距离基准仍然应该是“真正最近骑手”
 	nearestMeters := math.Sqrt(candidates[0].DistanceSquaredMeters)
 	
 	maxDistanceSquared := (nearestMeters + maxExtraDistanceMeters) * (nearestMeters + maxExtraDistanceMeters)
-	selected := candidates[0]
-	selectedIndex, exists := uidIndex[selected.RiderUID]
-	if !exists {
-		return model.Assignment{}, 0, fmt.Errorf("candidate rider UID %d is unknown", selected.RiderUID)
-	}
-	for _, candidate := range candidates[1:] {
+	
+	
+	// selected := candidates[0]
+	// selectedIndex, exists := uidIndex[selected.RiderUID]
+	// if !exists {
+	// 	return model.Assignment{}, 0, fmt.Errorf("candidate rider UID %d is unknown", selected.RiderUID)
+	// }
+	selectedExists := false
+	selected := matchrule.Candidate{}
+	selectedIndex := -1
+	capacityFiltered := 0
+
+	// 遍历所有candidate
+	for _, candidate := range candidates[0:] {
 		if candidate.DistanceSquaredMeters > maxDistanceSquared {
 			break
 		}
 		index, exists := uidIndex[candidate.RiderUID]
 		if !exists {
-			return model.Assignment{}, 0, fmt.Errorf("candidate rider UID %d is unknown", candidate.RiderUID)
+			return balancedSelection{}, fmt.Errorf("candidate rider UID %d is unknown", candidate.RiderUID)
+		}
+		if index < 0 || index >= len(loads) {
+			return balancedSelection{}, fmt.Errorf("rider's index out of range")
+		}
+
+		// 是否设置了骑手的订单限额 (0表示不限额)
+		hasLimit := maxOrdersPerRider > 0
+
+		isFull := hasLimit && loads[index] >= uint64(maxOrdersPerRider)
+
+		if isFull {
+			// 该骑手满额度
+			capacityFiltered += 1
+			continue
+		}
+
+		// 没有满额度且未选初始骑手
+		if !selectedExists {
+			selected = candidate
+			selectedIndex = index
+			selectedExists = true
+			continue
 		}
 
 		// 在距离允许范围内选择“最空闲骑手”
@@ -658,5 +836,19 @@ func chooseBalanced(
 			selectedIndex = index
 		}
 	}
-	return model.Assignment{OrderID: order.ID, Sequence: order.Sequence, RiderUID: selected.RiderUID, DistanceSquaredMeters: selected.DistanceSquaredMeters}, selectedIndex, nil
+
+	if selectedExists == false {
+		return balancedSelection{
+			assigned: false,
+			capacityFiltered: uint64(capacityFiltered),
+		}, nil
+	} else {
+		return balancedSelection{
+			 assignment: model.Assignment{OrderID: order.ID, Sequence: order.Sequence, RiderUID: selected.RiderUID, DistanceSquaredMeters: selected.DistanceSquaredMeters},
+			 riderIndex: selectedIndex,
+			 assigned: true,
+			 capacityFiltered: uint64(capacityFiltered),
+			}, nil
+	}
+
 }

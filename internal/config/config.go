@@ -65,6 +65,7 @@ type Config struct {  // 一次 benchmark 的完整配置
 	Strategy               Strategy
 	TopK                   int    // balanced 考虑最近几个骑手
 	MaxExtraDistanceMeters float64   // 为均衡最多允许多远 (防止 balanced 做得太过头)
+	MaxOrdersPerRider 	   int  // 限制每个骑手最多订单上限
 }
 
 // DisplayConfig is the stable, human-readable representation printed at
@@ -87,6 +88,7 @@ type DisplayConfig struct {  // 方便输出报告
 	Strategy               string  `json:"strategy"`
 	TopK                   int     `json:"topK"`
 	MaxExtraDistanceMeters float64 `json:"maxExtraDistanceMeters"`
+	MaxOrdersPerRider 	   int  `json:"maxOrdersPerRider"`
 }
 
 // 默认配置：
@@ -127,11 +129,16 @@ func Parse(args []string) (Config, error) {
 	riderDistribution := string(cfg.RiderDistribution)
 	orderDistribution := string(cfg.OrderDistribution)
 	strategy := string(cfg.Strategy)
+	// 骑手数量
 	flags.IntVar(&cfg.RiderCount, "riders", cfg.RiderCount, "number of riders")
+	// 订单数量
 	flags.IntVar(&cfg.OrderCount, "orders", cfg.OrderCount, "number of orders")
+	// 订单到达窗口 (Y 个订单计划到达系统的时间范围)
 	flags.DurationVar(&cfg.ArrivalWindow, "arrival-window", cfg.ArrivalWindow, "order arrival window")
 	flags.DurationVar(&cfg.RunTimeout, "timeout", cfg.RunTimeout, "whole-run timeout; zero disables the deadline")
 	flags.DurationVar(&cfg.MonitorInterval, "monitor-interval", cfg.MonitorInterval, "Go runtime resource sampling interval")
+	// 订单生成模型
+	// 注意: unbounded-所有订单立即到达；ArrivalWindow 只作为统计观察窗口
 	flags.StringVar(&arrivalModel, "arrival-model", arrivalModel, "arrival model: uniform-window, front-loaded-burst, or unbounded")
 	flags.Int64Var(&cfg.Seed, "seed", cfg.Seed, "deterministic random seed")
 	flags.StringVar(&riderDistribution, "rider-distribution", riderDistribution, "rider distribution: uniform, hotspot, or skewed")
@@ -143,6 +150,8 @@ func Parse(args []string) (Config, error) {
 	flags.StringVar(&strategy, "strategy", strategy, "matching strategy: nearest or balanced")
 	flags.IntVar(&cfg.TopK, "top-k", cfg.TopK, "strategy B nearest-candidate count")
 	flags.Float64Var(&cfg.MaxExtraDistanceMeters, "max-extra-distance", cfg.MaxExtraDistanceMeters, "strategy B maximum distance beyond the nearest rider in meters")
+
+	flags.IntVar(&cfg.MaxOrdersPerRider, "max-orders-per-rider", cfg.MaxOrdersPerRider, "Max Orders Per Rider")
 
 	if err := flags.Parse(args); err != nil {
 		return Config{}, err
@@ -167,11 +176,12 @@ func (c Config) Validate() error {
 	if c.RiderCount <= 0 {
 		errs = append(errs, errors.New("riders must be greater than zero"))
 	}
+	// 订单数校验
 	if c.OrderCount <= 0 {
 		errs = append(errs, errors.New("orders must be greater than zero"))
 	}
-	if c.ArrivalWindow < 0 {
-		errs = append(errs, errors.New("arrival window cannot be negative"))
+	if c.ArrivalWindow <= 0 {
+		errs = append(errs, errors.New("arrival window cannot be negative or zero"))
 	}
 	if c.RunTimeout < 0 {
 		errs = append(errs, errors.New("run timeout cannot be negative"))
@@ -239,5 +249,6 @@ func (c Config) Display() DisplayConfig {  //  把内部运行配置转换成人
 		Strategy:               string(c.Strategy),
 		TopK:                   c.TopK,
 		MaxExtraDistanceMeters: c.MaxExtraDistanceMeters,
+		MaxOrdersPerRider:      c.MaxOrdersPerRider,
 	}
 }
