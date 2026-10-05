@@ -807,9 +807,19 @@ func chooseBalanced(
 
 	// 使用当前第一个候选骑手计算最近距离
 	// 即使第一个骑手已经满额，距离基准仍然应该是“真正最近骑手”
-	nearestMeters := math.Sqrt(candidates[0].DistanceSquaredMeters)
 	
-	maxDistanceSquared := (nearestMeters + maxExtraDistanceMeters) * (nearestMeters + maxExtraDistanceMeters)
+	nearestSquared := candidates[0].DistanceSquaredMeters
+	maxDistanceSquared := nearestSquared
+
+	if maxExtraDistanceMeters > 0 {
+		nearestMeters := math.Sqrt(candidates[0].DistanceSquaredMeters)
+		extra := maxExtraDistanceMeters
+
+		maxDistanceSquared = nearestSquared + 2*nearestMeters*extra + extra * extra
+	
+	}
+
+	// maxDistanceSquared := (nearestMeters + maxExtraDistanceMeters) * (nearestMeters + maxExtraDistanceMeters)
 	
 	
 	// selected := candidates[0]

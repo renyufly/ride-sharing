@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -41,7 +42,7 @@ func newJSONLScanner(reader io.Reader) *bufio.Scanner {
 
 // 输入文件预检查
 // 第一次提前验证全部输入并得到订单数
-func inspectFile(filePath string, expectedAttempt uint32) (uint64, error) {
+func inspectFile(filePath string, expectedAttempt uint32) (recordCount uint64, resultErr error) {
 	if filePath == "" {
 		return 0, fmt.Errorf("deferred input path cannot be empty")
 	}
@@ -55,10 +56,18 @@ func inspectFile(filePath string, expectedAttempt uint32) (uint64, error) {
 		return 0, fmt.Errorf("open deferred input %s: %s", filePath, err)
 	}
 
+	defer func() {
+		closeErr := file.Close()
+
+		if closeErr != nil {
+			wrappedCloseErr := fmt.Errorf("failed to close file %s: %w", filePath, closeErr)
+			resultErr = errors.Join(resultErr, wrappedCloseErr)
+		}
+	}()
+
 	scanner := newJSONLScanner(file)
 
 	var lineNumber uint64 = 0
-	var recordCount uint64 = 0
 
 	for scanner.Scan() {
 		lineNumber++  // 行数
