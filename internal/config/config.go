@@ -66,6 +66,8 @@ type Config struct {  // 一次 benchmark 的完整配置
 	TopK                   int    // balanced 考虑最近几个骑手
 	MaxExtraDistanceMeters float64   // 为均衡最多允许多远 (防止 balanced 做得太过头)
 	MaxOrdersPerRider 	   int  // 限制每个骑手最多订单上限
+	DeferredOutput 		   string  // deferred 输出的jsonL文件
+	Attempt 			   uint   // 第几轮尝试
 }
 
 // DisplayConfig is the stable, human-readable representation printed at
@@ -89,6 +91,8 @@ type DisplayConfig struct {  // 方便输出报告
 	TopK                   int     `json:"topK"`
 	MaxExtraDistanceMeters float64 `json:"maxExtraDistanceMeters"`
 	MaxOrdersPerRider 	   int  `json:"maxOrdersPerRider"`
+	DeferredOutput 		   string  `json:"deferredOutput"`// deferred 输出的jsonL文件
+	Attempt 			   uint 	`json:"attempt"`
 }
 
 // 默认配置：
@@ -152,6 +156,9 @@ func Parse(args []string) (Config, error) {
 	flags.Float64Var(&cfg.MaxExtraDistanceMeters, "max-extra-distance", cfg.MaxExtraDistanceMeters, "strategy B maximum distance beyond the nearest rider in meters")
 
 	flags.IntVar(&cfg.MaxOrdersPerRider, "max-orders-per-rider", cfg.MaxOrdersPerRider, "Max Orders Per Rider")
+
+	flags.StringVar(&cfg.DeferredOutput, "deferred-output", cfg.DeferredOutput, "output file of deferred orders")
+	flags.UintVar(&cfg.Attempt, "attempt", cfg.Attempt, "current round of attemptation")
 
 	if err := flags.Parse(args); err != nil {
 		return Config{}, err
@@ -250,5 +257,7 @@ func (c Config) Display() DisplayConfig {  //  把内部运行配置转换成人
 		TopK:                   c.TopK,
 		MaxExtraDistanceMeters: c.MaxExtraDistanceMeters,
 		MaxOrdersPerRider:      c.MaxOrdersPerRider,
+		DeferredOutput : 		c.DeferredOutput,  // deferred 输出的jsonL文件
+		Attempt:				c.Attempt, 
 	}
 }

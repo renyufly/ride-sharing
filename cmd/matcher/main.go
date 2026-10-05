@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"ride-sharing/internal/config"
+	"ride-sharing/internal/deferred"
 	"ride-sharing/internal/generator"
 	"ride-sharing/internal/geo"
 	matchrule "ride-sharing/internal/matcher"
@@ -243,6 +244,7 @@ func main() {
 			MaxExtraDistanceMeters: cfg.MaxExtraDistanceMeters,
 			MaxOrdersPerRider: cfg.MaxOrdersPerRider,
 			AssignmentWindow: cfg.ArrivalWindow,
+			Attempt: 		  uint32(cfg.Attempt),
 		}
 		estimate, estimateErr := pipeline.EstimateBalancedMemory(cfg.RiderCount, balancedOptions)
 		if estimateErr != nil {
@@ -250,7 +252,21 @@ func main() {
 			os.Exit(1)
 		}
 		balancedMemory = &estimate
-		pipelineResult, err = pipeline.RunBalanced(runContext, stream, selectedMatcher, riders, balancedOptions)
+
+		//
+		fileSink, fileErr := deferred.NewFileSink(cfg.DeferredOutput)
+		if fileErr != nil {
+			fmt.Fprintf(os.Stderr, "cannot create fileSink: %v\n", fileErr)
+			os.Exit(1)
+		}
+
+		pipelineResult, err = pipeline.RunBalanced(runContext, stream, selectedMatcher, riders, balancedOptions, fileSink)
+	
+		if closeErr := fileSink.Close(); closeErr != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", closeErr)
+			os.Exit(1)
+		}
+	
 	default:
 		err = fmt.Errorf("unsupported strategy %q", cfg.Strategy)
 	}

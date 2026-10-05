@@ -35,6 +35,7 @@ type BalancedOptions struct {
 	MaxExtraDistanceMeters float64  // 允许参与负载均衡的最远距离
 	MaxOrdersPerRider      int  // 每个骑手的订单上限
 	AssignmentWindow 	   time.Duration  // 主分配阶段时长 == 订单总生成窗口arrival window
+	Attempt 			   uint32
 }
 
 func (o BalancedOptions) Validate(riderCount int) error {
@@ -50,6 +51,10 @@ func (o BalancedOptions) Validate(riderCount int) error {
 	}
 	if o.MaxExtraDistanceMeters < 0 || math.IsNaN(o.MaxExtraDistanceMeters) || math.IsInf(o.MaxExtraDistanceMeters, 0) {
 		errs = append(errs, errors.New("max extra distance must be finite and non-negative"))
+	}
+
+	if o.Attempt <= 0 {
+		errs = append(errs, errors.New("attempt must be greater than 0"))
 	}
 	return errors.Join(errs...)
 }
@@ -204,6 +209,7 @@ func RunBalanced(
 	matcher CandidateMatcher,
 	riders []model.Rider,
 	options BalancedOptions,
+	deferredSink DeferredOrderSink,
 ) (Result, error) {
 	if ctx == nil {
 		return Result{}, errors.New("context cannot be nil")
@@ -246,7 +252,7 @@ func RunBalanced(
 	go produceBalanced(runContext, cancel, runStarted, source, batchChannel, batchPool, candidatePool, options.Options, producerResults)
 	
 	// 只有一个 Coordinator Goroutine
-	go coordinateBalanced(runContext, cancel, runStarted, candidateChannel, candidatePool, riders, options, coordinatorResults)
+	go coordinateBalanced(runContext, cancel, runStarted, candidateChannel, candidatePool, riders, options, coordinatorResults, deferredSink)
 
 	var workers sync.WaitGroup
 	workers.Add(options.Workers)
@@ -590,6 +596,7 @@ func coordinateBalanced(
 	riders []model.Rider,
 	options BalancedOptions,
 	output chan<- coordinatorResult,
+	deferredSink DeferredOrderSink,
 ) {
 	reporter, err := report.New(riders)
 	state := coordinatorResult{preview: make([]model.Assignment, 0, options.PreviewSize), deferredPreview: make([]DeferredOrder, 0, options.PreviewSize), reporter: reporter}
@@ -664,19 +671,23 @@ func coordinateBalanced(
 					// 超时，不能分配
 					deferredAt := time.Since(start).Nanoseconds()
 
+					deferredOrder := DeferredOrder{
+						Order: ready.order,
+						Reason: DeferredReasonWindowExpired,
+						DeferredAtNs: deferredAt,
+						Attempt: options.Attempt,
+					}
+
+
+					if err := deferredSink.Store(ctx, deferredOrder); err != nil {
+						state.err = fmt.Errorf("sink'store is wrong: %s", err)
+						cancel()
+						return
+					}
+
+
 					state.deferred += 1 //
 					state.deferredByWindow += 1
-
-					if len(state.deferredPreview) < options.PreviewSize {
-						state.deferredPreview = append(
-							state.deferredPreview, 
-							DeferredOrder{
-								Order: ready.order,
-								Reason:DeferredReasonWindowExpired,
-								DeferredAtNs: deferredAt,
-							},
-						)
-					}
 				
 					delete(pending, next)
 					next++
@@ -710,6 +721,21 @@ func coordinateBalanced(
 				if balancedSelection.assigned == false {
 					// 全部满额度
 					deferredAt := time.Since(start).Nanoseconds()
+
+					deferredOrder := DeferredOrder{
+						Order: ready.order,
+						Reason: DeferredReasonCapacityExhausted,
+						DeferredAtNs: deferredAt,
+						Attempt: options.Attempt,
+					}
+
+
+					if err := deferredSink.Store(ctx, deferredOrder); err != nil {
+						state.err = fmt.Errorf("sink'store is wrong: %s", err)
+						cancel()
+						return
+					}
+
 
 					state.deferred += 1 //
 					state.deferredByCapacity += 1
