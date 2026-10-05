@@ -1,6 +1,9 @@
 package deferred
 
-import "ride-sharing/internal/pipeline"
+import (
+	"ride-sharing/internal/model"
+	"ride-sharing/internal/pipeline"
+)
 
 type deferredRecord struct {
 	Version int   `json:"version"`
@@ -48,5 +51,18 @@ func newDeferredRecord(order pipeline.DeferredOrder) deferredRecord {
 			},
 		},
 	}
+
+}
+
+// 转换回model.Order
+func toModelOrder(record deferredRecord, sequence uint64) model.Order {
+	return model.Order{
+		ID: record.Order.ID,
+		Sequence: sequence,
+		PlannedArrivalNs: 0,  // 在第二轮立即可处理
+		Pickup: model.GeoPoint(record.Order.Pickup),
+		Point: model.Point2D(record.Order.Point),
+	}
+
 
 }

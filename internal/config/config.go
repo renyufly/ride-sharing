@@ -68,6 +68,7 @@ type Config struct {  // 一次 benchmark 的完整配置
 	MaxOrdersPerRider 	   int  // 限制每个骑手最多订单上限
 	DeferredOutput 		   string  // deferred 输出的jsonL文件
 	Attempt 			   uint   // 第几轮尝试
+	DeferredInput 		   string  // deferred 输入的jsonL文件
 }
 
 // DisplayConfig is the stable, human-readable representation printed at
@@ -93,6 +94,7 @@ type DisplayConfig struct {  // 方便输出报告
 	MaxOrdersPerRider 	   int  `json:"maxOrdersPerRider"`
 	DeferredOutput 		   string  `json:"deferredOutput"`// deferred 输出的jsonL文件
 	Attempt 			   uint 	`json:"attempt"`
+	DeferredInput 		   string   `json:"deferredInput"`
 }
 
 // 默认配置：
@@ -159,6 +161,9 @@ func Parse(args []string) (Config, error) {
 
 	flags.StringVar(&cfg.DeferredOutput, "deferred-output", cfg.DeferredOutput, "output file of deferred orders")
 	flags.UintVar(&cfg.Attempt, "attempt", cfg.Attempt, "current round of attemptation")
+
+	flags.StringVar(&cfg.DeferredInput, "deferred-input", cfg.DeferredInput, "input file of deferred orders")
+	
 
 	if err := flags.Parse(args); err != nil {
 		return Config{}, err
@@ -259,5 +264,6 @@ func (c Config) Display() DisplayConfig {  //  把内部运行配置转换成人
 		MaxOrdersPerRider:      c.MaxOrdersPerRider,
 		DeferredOutput : 		c.DeferredOutput,  // deferred 输出的jsonL文件
 		Attempt:				c.Attempt, 
+		DeferredInput: 			c.DeferredInput,
 	}
 }

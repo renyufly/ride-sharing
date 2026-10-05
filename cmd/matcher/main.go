@@ -183,11 +183,50 @@ func main() {
 	indexBuildDuration := time.Since(indexBuildStarted)
 	
 	// 创建订单流，而不是直接创建 1 万订单
-	stream, err := dataGenerator.NewOrderStream(cfg.OrderCount, cfg.ArrivalWindow, cfg.ArrivalModel, cfg.OrderDistribution)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "create order stream: %v\n", err)
-		os.Exit(1)
+	// stream, err := dataGenerator.NewOrderStream(cfg.OrderCount, cfg.ArrivalWindow, cfg.ArrivalModel, cfg.OrderDistribution)
+	// if err != nil {
+	// 	fmt.Fprintf(os.Stderr, "create order stream: %v\n", err)
+	// 	os.Exit(1)
+	// }
+
+	var orderSource pipeline.OrderSource
+	expectedOrders := uint64(0)
+	var inputCloser *deferred.FileSource
+
+	if cfg.DeferredInput == "" {
+		generatedStream, err := dataGenerator.NewOrderStream(cfg.OrderCount, cfg.ArrivalWindow, cfg.ArrivalModel, cfg.OrderDistribution)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create order stream: %v\n", err)
+			os.Exit(1)
+		}
+
+		orderSource = generatedStream
+		expectedOrders = uint64(cfg.OrderCount)
+
+	} else {
+		if cfg.Attempt <= 1 {
+			fmt.Fprintf(os.Stderr, "attempt wrong\n")
+			os.Exit(1)
+		}
+
+		expectedInputAttempt := cfg.Attempt-1
+
+		fileSource, count, err := deferred.OpenFileSource(
+			cfg.DeferredInput, uint32(expectedInputAttempt),
+		)
+
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "attempt wrong %v\n", err)
+			os.Exit(1)
+		}
+
+		orderSource = fileSource
+		expectedOrders = count
+		cfg.OrderCount = int(count)  //
+		inputCloser = fileSource
+
 	}
+
 
 	const previewSize = 3  // 只 Preview 3 条数据(完整数据参与计算，只保存极少数样本用于验证)
 
@@ -206,7 +245,7 @@ func main() {
 		Workers:         cfg.Workers,
 		BatchSize:       cfg.BatchSize,   // 一次处理多少订单
 		ChannelCapacity: cfg.ChannelCapacity,
-		ExpectedOrders:  uint64(cfg.OrderCount),
+		ExpectedOrders:  expectedOrders,
 		PreviewSize:     previewSize,
 		ObservationWindow: cfg.ArrivalWindow,
 	}
@@ -234,7 +273,7 @@ func main() {
 	switch cfg.Strategy {
 	case config.StrategyNearest:
 		// 距离优先
-		pipelineResult, err = pipeline.Run(runContext, stream, selectedMatcher, riders, pipelineOptions)
+		pipelineResult, err = pipeline.Run(runContext, orderSource, selectedMatcher, riders, pipelineOptions)
 	
 	case config.StrategyBalanced:
 		// 负载均衡-pipeline.RunBalanced()
@@ -260,8 +299,17 @@ func main() {
 			os.Exit(1)
 		}
 
-		pipelineResult, err = pipeline.RunBalanced(runContext, stream, selectedMatcher, riders, balancedOptions, fileSink)
+		pipelineResult, err = pipeline.RunBalanced(runContext, orderSource, selectedMatcher, riders, balancedOptions, fileSink)
 	
+		if inputCloser != nil {
+			if inputCloseErr := inputCloser.Close(); inputCloseErr != nil {
+				fmt.Fprintf(os.Stderr, "%v\n", inputCloseErr)
+				os.Exit(1)
+			}
+		}
+		
+
+		// 关闭
 		if closeErr := fileSink.Close(); closeErr != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", closeErr)
 			os.Exit(1)
