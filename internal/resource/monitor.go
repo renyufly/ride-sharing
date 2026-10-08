@@ -30,8 +30,8 @@ type Stats struct {
 	NumGCDelta           uint32 `json:"numGCDelta"`  // 一共触发多少次 GC
 	GCPauseDeltaNs       uint64 `json:"gcPauseDeltaNs"`
 	PeakGoroutines       int    `json:"peakGoroutines"`  // 整个运行期间观测到的最大 goroutine 数量
-	PeakStackInuseBytes  uint64 `json:"PeakStackInuseBytes"`  // 当前正在使用的 goroutine 栈区域
-	PeakStackSysBytes	 uint64 `json:"PeakStackSysBytes"`  // Runtime 从系统获得的栈内存
+	PeakStackInuseBytes  uint64 `json:"peakStackInuseBytes"`  // 当前正在使用的 goroutine 栈区域
+	PeakStackSysBytes	 uint64 `json:"peakStackSysBytes"`  // Runtime 从系统获得的栈内存
 }
 
 type Monitor struct {
@@ -118,6 +118,8 @@ func (m *Monitor) sample() {
 				NumGCDelta:           uint32(delta(uint64(end.NumGC), uint64(m.start.NumGC))),
 				GCPauseDeltaNs:       delta(end.PauseTotalNs, m.start.PauseTotalNs),
 				PeakGoroutines:       peakGoroutines,
+				PeakStackInuseBytes: peakStackInuse,
+				PeakStackSysBytes: peakStackSys,
 			}
 			m.mu.Unlock()
 			return

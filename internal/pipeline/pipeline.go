@@ -111,10 +111,10 @@ type PerformanceMetrics struct {
 }
 
 type AlgorithmPerformanceMetrics struct {
-	NearestSearch       LatencySummary   // 策略 A 只填写 NearestSearch
-    CandidateSearch     LatencySummary
-    AssignmentDecision  LatencySummary
-    AlgorithmCompute    LatencySummary
+	NearestSearch       LatencySummary  `json:"nearestSearch"` // 策略 A 只填写 NearestSearch
+    CandidateSearch     LatencySummary 	`json:"candidateSearch"`
+    AssignmentDecision  LatencySummary	`json:"assignmentDecision"`
+    AlgorithmCompute    LatencySummary	`json:"algorithmCompute"`
 }
 
 type RunError struct {

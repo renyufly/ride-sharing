@@ -110,6 +110,35 @@ k8s_yaml('./infra/development/k8s/driver-service-deployment.yaml')
 k8s_resource('driver-service', resource_deps=['driver-service-compile', 'rabbitmq'], labels="services")
 
 ### End of Driver Service ###
+### Matcher API ###
+
+matcher_compile_cmd = 'CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o build/matcher-api ./cmd/matcherapi'
+if os.name == 'nt':
+  matcher_compile_cmd = 'cmd /c infra\\development\\docker\\matcher-api-build.bat'
+
+local_resource(
+  'matcher-api-compile',
+  matcher_compile_cmd,
+  deps=['./cmd/matcherapi', './internal','./shared', './go.mod', './go.sum'], labels="compiles")
+
+
+docker_build_with_restart(
+  'ride-sharing/matcher-api',
+  '.',
+  entrypoint=['/app/matcher-api'],
+  dockerfile='./infra/development/docker/matcher-api.Dockerfile',
+  only=[
+    './build/matcher-api',
+  ],
+  live_update=[
+    sync('./build/matcher-api', '/app/matcher-api'),
+  ],
+)
+
+k8s_yaml('./infra/development/k8s/matcher-api-deployment.yaml')
+k8s_resource('matcher-api', port_forwards=8082,
+             resource_deps=['matcher-api-compile'], labels="services")
+### End of Matcher API ###
 ### Web Frontend ###
 
 docker_build(
@@ -119,7 +148,8 @@ docker_build(
 )
 
 k8s_yaml('./infra/development/k8s/web-deployment.yaml')
-k8s_resource('web', port_forwards=3000, labels="frontend")
+k8s_resource('web', port_forwards=3000, labels="frontend",
+             resource_deps=['matcher-api'])
 
 ### End of Web Frontend ###
 

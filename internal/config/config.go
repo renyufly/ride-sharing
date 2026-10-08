@@ -120,6 +120,7 @@ func Default() Config {
 		BatchSize:         1,
 		ChannelCapacity:   16,
 		Strategy:          StrategyNearest,
+		Attempt: 1,
 	}
 }
 

@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: matcher-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: matcher-api
+  template:
+    metadata:
+      labels:
+        app: matcher-api
+    spec:
+      containers:
+        - name: matcher-api
+          image: ride-sharing/matcher-api
+          ports:
+            - containerPort: 8082
+          resources:
+            requests:
+              memory: "4Gi"
+              cpu: "2"
+            limits:
+              memory: "4Gi"
+              cpu: "2"
+          # env:
+          #   # Accessing an env variable from the app-config config map
+          #   - name: MATCHER_HTTP_ADDR
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: matcher-api
+spec:
+  ports:
+    - port: 8082
+      targetPort: 8082
+  selector:
+    app: matcher-api
