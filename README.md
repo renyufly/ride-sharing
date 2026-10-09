@@ -88,3 +88,19 @@ internal/
 - `resource`：采样内存、分配、GC、Goroutine 和栈使用情况。
 
 这种组织将候选搜索、调度决策、运行编排、HTTP 协议和展示层解耦，便于独立测试、替换算法以及扩展新的订单来源或 Deferred 存储方式。
+
+│ │ └─ MatcherMap.tsx Matcher 骑手、订单及分配关系地图
+│ ├─ ui/ Card、Button、Avatar 等通用 UI 基础组件
+│ └─ \*.tsx 首页使用的司机、骑手、路线和支付组件
+├─ hooks/ 司机与骑手实时连接 Hook
+├─ assets/ 前端静态资源
+├─ lib/ 通用样式与工具函数
+├─ utils/ Geohash 和数学工具
+├─ contracts.ts 拼车业务的 HTTP/WebSocket 协议
+├─ types.ts Trip、Driver、Route 等共享业务类型
+└─ constants.ts 前端共享常量
+
+```
+
+Matcher 页面按入口、状态行为、展示和纯辅助逻辑拆分：`page.tsx` 不包含具体业务流程；`useMatcherPage.ts` 负责运行实验和 Deferred Retry 的状态及请求；`MatcherView.tsx` 只消费页面模型并渲染配置、统计结果和地图；`matcher_helpers.ts` 保存无 React 状态依赖的默认值、校验和格式化逻辑。HTTP 数据结构集中定义在 `components/matcher/contracts.ts`，地图作为独立组件按客户端能力动态加载，避免 Leaflet 参与服务端渲染。
+```
