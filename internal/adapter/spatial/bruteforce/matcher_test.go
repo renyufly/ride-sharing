@@ -2,21 +2,22 @@ package bruteforce
 
 import (
 	"math"
+	"ride-sharing/internal/domain/order"
+	"ride-sharing/internal/domain/rider"
 	"testing"
 	"time"
 
+	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/generator"
-	"ride-sharing/internal/geo"
-	"ride-sharing/internal/model"
 )
 
 func TestMatchReturnsGlobalNearestRider(t *testing.T) {
-	matcher := mustMatcher(t, []model.Rider{
-		{UID: 20, Point: model.Point2D{X: 10, Y: 10}},
-		{UID: 30, Point: model.Point2D{X: 2, Y: 3}},
-		{UID: 10, Point: model.Point2D{X: -5, Y: -5}},
+	matcher := mustMatcher(t, []rider.Rider{
+		{UID: 20, Point: geo.Point2D{X: 10, Y: 10}},
+		{UID: 30, Point: geo.Point2D{X: 2, Y: 3}},
+		{UID: 10, Point: geo.Point2D{X: -5, Y: -5}},
 	})
-	order := model.Order{ID: 1001, Sequence: 7, Point: model.Point2D{X: 1, Y: 1}}
+	order := order.Order{ID: 1001, Sequence: 7, Point: geo.Point2D{X: 1, Y: 1}}
 
 	assignment, err := matcher.Match(order)
 	if err != nil {
@@ -34,13 +35,13 @@ func TestMatchReturnsGlobalNearestRider(t *testing.T) {
 }
 
 func TestMatchBreaksDistanceTieBySmallerUID(t *testing.T) {
-	matcher := mustMatcher(t, []model.Rider{
-		{UID: 99, Point: model.Point2D{X: 1, Y: 0}},
-		{UID: 7, Point: model.Point2D{X: -1, Y: 0}},
-		{UID: 3, Point: model.Point2D{X: 0, Y: 1}},
+	matcher := mustMatcher(t, []rider.Rider{
+		{UID: 99, Point: geo.Point2D{X: 1, Y: 0}},
+		{UID: 7, Point: geo.Point2D{X: -1, Y: 0}},
+		{UID: 3, Point: geo.Point2D{X: 0, Y: 1}},
 	})
 
-	assignment, err := matcher.Match(model.Order{ID: 1, Point: model.Point2D{}})
+	assignment, err := matcher.Match(order.Order{ID: 1, Point: geo.Point2D{}})
 	if err != nil {
 		t.Fatalf("Match() error = %v", err)
 	}
@@ -50,21 +51,21 @@ func TestMatchBreaksDistanceTieBySmallerUID(t *testing.T) {
 }
 
 func TestMatchUsesProjectedPointNotRawLatitudeLongitude(t *testing.T) {
-	matcher := mustMatcher(t, []model.Rider{
+	matcher := mustMatcher(t, []rider.Rider{
 		{
 			UID:      1,
-			Location: model.GeoPoint{Latitude: 0, Longitude: 0},
-			Point:    model.Point2D{X: 100, Y: 100},
+			Location: geo.GeoPoint{Latitude: 0, Longitude: 0},
+			Point:    geo.Point2D{X: 100, Y: 100},
 		},
 		{
 			UID:      2,
-			Location: model.GeoPoint{Latitude: 80, Longitude: 170},
-			Point:    model.Point2D{X: 1, Y: 1},
+			Location: geo.GeoPoint{Latitude: 80, Longitude: 170},
+			Point:    geo.Point2D{X: 1, Y: 1},
 		},
 	})
-	order := model.Order{
-		Pickup: model.GeoPoint{Latitude: 0, Longitude: 0},
-		Point:  model.Point2D{},
+	order := order.Order{
+		Pickup: geo.GeoPoint{Latitude: 0, Longitude: 0},
+		Point:  geo.Point2D{},
 	}
 
 	assignment, err := matcher.Match(order)
@@ -77,14 +78,14 @@ func TestMatchUsesProjectedPointNotRawLatitudeLongitude(t *testing.T) {
 }
 
 func TestNewCopiesRiderSet(t *testing.T) {
-	riders := []model.Rider{
-		{UID: 1, Point: model.Point2D{X: 1}},
-		{UID: 2, Point: model.Point2D{X: 10}},
+	riders := []rider.Rider{
+		{UID: 1, Point: geo.Point2D{X: 1}},
+		{UID: 2, Point: geo.Point2D{X: 10}},
 	}
 	matcher := mustMatcher(t, riders)
 	riders[0].Point.X = 1_000
 
-	assignment, err := matcher.Match(model.Order{Point: model.Point2D{}})
+	assignment, err := matcher.Match(order.Order{Point: geo.Point2D{}})
 	if err != nil {
 		t.Fatalf("Match() error = %v", err)
 	}
@@ -96,11 +97,11 @@ func TestNewCopiesRiderSet(t *testing.T) {
 func TestNewRejectsInvalidRiders(t *testing.T) {
 	tests := []struct {
 		name   string
-		riders []model.Rider
+		riders []rider.Rider
 	}{
 		{name: "empty"},
-		{name: "duplicate UID", riders: []model.Rider{{UID: 1}, {UID: 1}}},
-		{name: "NaN point", riders: []model.Rider{{UID: 1, Point: model.Point2D{X: math.NaN()}}}},
+		{name: "duplicate UID", riders: []rider.Rider{{UID: 1}, {UID: 1}}},
+		{name: "NaN point", riders: []rider.Rider{{UID: 1, Point: geo.Point2D{X: math.NaN()}}}},
 	}
 
 	for _, test := range tests {
@@ -113,8 +114,8 @@ func TestNewRejectsInvalidRiders(t *testing.T) {
 }
 
 func TestMatchRejectsNonFiniteOrderPoint(t *testing.T) {
-	matcher := mustMatcher(t, []model.Rider{{UID: 1}})
-	_, err := matcher.Match(model.Order{ID: 9, Point: model.Point2D{Y: math.Inf(1)}})
+	matcher := mustMatcher(t, []rider.Rider{{UID: 1}})
+	_, err := matcher.Match(order.Order{ID: 9, Point: geo.Point2D{Y: math.Inf(1)}})
 	if err == nil {
 		t.Fatal("Match() error = nil, want non-finite point error")
 	}
@@ -171,7 +172,7 @@ func TestRequiredCorrectnessScales(t *testing.T) {
 	}
 }
 
-func mustMatcher(t *testing.T, riders []model.Rider) Matcher {
+func mustMatcher(t *testing.T, riders []rider.Rider) Matcher {
 	t.Helper()
 	matcher, err := New(riders)
 	if err != nil {

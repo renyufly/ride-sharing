@@ -3,13 +3,13 @@ package deferred
 import (
 	"errors"
 	"fmt"
-	"ride-sharing/internal/model"
+	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/pipeline"
 )
 
 type MemorySource struct {
 	orders []pipeline.DeferredOrder
-	next int
+	next   int
 }
 
 func NewMemorySource(orders []pipeline.DeferredOrder) (*MemorySource, error) {
@@ -32,14 +32,14 @@ func NewMemorySource(orders []pipeline.DeferredOrder) (*MemorySource, error) {
 
 }
 
-func (s *MemorySource) Next() (model.Order, bool, error) {
+func (s *MemorySource) Next() (order.Order, bool, error) {
 	if s == nil {
-		return model.Order{}, false, errors.New("memory source is nil")
+		return order.Order{}, false, errors.New("memory source is nil")
 	}
 
 	// 如果 next >= orders 长度，说明已无更多订单，正常结束
 	if s.next >= len(s.orders) {
-		return model.Order{}, false, nil
+		return order.Order{}, false, nil
 	}
 
 	// 读取 orders[next].Order 的值副本

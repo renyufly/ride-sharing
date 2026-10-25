@@ -3,12 +3,10 @@ package geo
 import (
 	"math"
 	"testing"
-
-	"ride-sharing/internal/model"
 )
 
 func TestValidatePointRejectsInvalidCoordinates(t *testing.T) {
-	tests := []model.GeoPoint{
+	tests := []GeoPoint{
 		{Latitude: -90.01},
 		{Latitude: 90.01},
 		{Longitude: -180.01},
@@ -25,7 +23,7 @@ func TestValidatePointRejectsInvalidCoordinates(t *testing.T) {
 }
 
 func TestBoundingBoxIncludesBoundary(t *testing.T) {
-	for _, point := range []model.GeoPoint{
+	for _, point := range []GeoPoint{
 		{Latitude: SanFranciscoBounds.MinLatitude, Longitude: SanFranciscoBounds.MinLongitude},
 		{Latitude: SanFranciscoBounds.MaxLatitude, Longitude: SanFranciscoBounds.MaxLongitude},
 	} {
@@ -40,7 +38,7 @@ func TestProjectorIsDeterministicAndUsesMeters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProjector() error = %v", err)
 	}
-	point := model.GeoPoint{Latitude: 37.78, Longitude: -122.42}
+	point := GeoPoint{Latitude: 37.78, Longitude: -122.42}
 
 	first, err := projector.Project(point)
 	if err != nil {
@@ -69,7 +67,7 @@ func TestProjectionOriginMapsToZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Project() error = %v", err)
 	}
-	if point != (model.Point2D{}) {
+	if point != (Point2D{}) {
 		t.Fatalf("Project(origin) = %+v, want zero", point)
 	}
 }
@@ -79,7 +77,7 @@ func TestRepeatedCoordinatesProduceIdenticalPoints(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProjector() error = %v", err)
 	}
-	coordinate := model.GeoPoint{Latitude: 37.768727753110106, Longitude: -122.41345597077878}
+	coordinate := GeoPoint{Latitude: 37.768727753110106, Longitude: -122.41345597077878}
 
 	first, err := projector.Project(coordinate)
 	if err != nil {

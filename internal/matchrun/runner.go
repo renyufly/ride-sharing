@@ -5,28 +5,30 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"ride-sharing/internal/adapter/spatial/bruteforce"
+	"ride-sharing/internal/adapter/spatial/kdtree"
 	"ride-sharing/internal/config"
 	"ride-sharing/internal/deferred"
+	"ride-sharing/internal/domain/geo"
+	"ride-sharing/internal/domain/matching"
+	"ride-sharing/internal/domain/order"
+	"ride-sharing/internal/domain/rider"
 	"ride-sharing/internal/generator"
-	"ride-sharing/internal/geo"
 	matchrule "ride-sharing/internal/matcher"
-	"ride-sharing/internal/matcher/bruteforce"
-	"ride-sharing/internal/matcher/kdtree"
 
-	"ride-sharing/internal/model"
 	"ride-sharing/internal/pipeline"
 	"ride-sharing/internal/resource"
 	"runtime"
 	"time"
 )
 
-type nearestMatcher interface {  
-	Match(model.Order) (model.Assignment, error)
-	TopKInto(model.Order, int, []matchrule.Candidate) ([]matchrule.Candidate, error)
+type nearestMatcher interface {
+	Match(order.Order) (matching.Assignment, error)
+	TopKInto(order.Order, int, []matching.Candidate) ([]matching.Candidate, error)
 	IndexStats() matchrule.IndexStats
 }
 
-func createMatcher(cfg config.Config, riders []model.Rider) (nearestMatcher, error) {
+func createMatcher(cfg config.Config, riders []rider.Rider) (nearestMatcher, error) {
 	var selectedMatcher nearestMatcher
 	var err error
 	switch cfg.Algorithm {
@@ -43,8 +45,8 @@ func createMatcher(cfg config.Config, riders []model.Rider) (nearestMatcher, err
 }
 
 // 订单源辅助函数
-func createOrderSource (cfg *config.Config, dataGenerator generator.Generator) (pipeline.OrderSource, uint64, io.Closer, error) {
-	
+func createOrderSource(cfg *config.Config, dataGenerator generator.Generator) (pipeline.OrderSource, uint64, io.Closer, error) {
+
 	if cfg.DeferredInput == "" {
 		generatedStream, err := dataGenerator.NewOrderStream(cfg.OrderCount, cfg.ArrivalWindow, cfg.ArrivalModel, cfg.OrderDistribution)
 		if err != nil {
@@ -64,7 +66,7 @@ func createOrderSource (cfg *config.Config, dataGenerator generator.Generator) (
 		return nil, 0, nil, fmt.Errorf("%w", err)
 	}
 
-	// 
+	//
 	cfg.OrderCount = int(count)
 
 	// 调用者通过第一个接口读取订单，通过第三个接口负责最终关闭文件
@@ -72,7 +74,7 @@ func createOrderSource (cfg *config.Config, dataGenerator generator.Generator) (
 
 }
 
-func previewRiders(riders []model.Rider, limit int) []model.Rider {
+func previewRiders(riders []rider.Rider, limit int) []rider.Rider {
 	if limit <= 0 {
 		return nil
 	}
@@ -81,7 +83,7 @@ func previewRiders(riders []model.Rider, limit int) []model.Rider {
 		limit = len(riders)
 	}
 
-	rider := make([]model.Rider, limit)
+	rider := make([]rider.Rider, limit)
 
 	copy(rider, riders[:limit])
 
@@ -94,7 +96,7 @@ func Run(ctx context.Context, req Request) (ret Result, resultErr error) {
 		return Result{}, fmt.Errorf("context cannot be nil")
 	}
 
-	if err:= req.Config.Validate(); err != nil {
+	if err := req.Config.Validate(); err != nil {
 		return Result{}, fmt.Errorf("validate matcher run configuration: %w", err)
 	}
 
@@ -137,7 +139,7 @@ func Run(ctx context.Context, req Request) (ret Result, resultErr error) {
 	// TODO
 	riderGenerationStarted := time.Now()
 
-	dataGenerator , err := generator.New(effectiveConfig.Seed, geo.SanFranciscoBounds)
+	dataGenerator, err := generator.New(effectiveConfig.Seed, geo.SanFranciscoBounds)
 	if err != nil {
 		return Result{}, fmt.Errorf("%w", err)
 	}
@@ -176,7 +178,6 @@ func Run(ctx context.Context, req Request) (ret Result, resultErr error) {
 			return ret, fmt.Errorf("create order source: %w", err)
 		}
 	}
-	
 
 	if sourceCloser != nil {
 		defer func() {
@@ -186,33 +187,30 @@ func Run(ctx context.Context, req Request) (ret Result, resultErr error) {
 		}()
 	}
 
-
 	ret = Result{
-		Config: effectiveConfig,
-		Bounds: dataGenerator.Bounds(),
-		ProjectionOrigin: dataGenerator.Origin(),
-		Seeds: dataGenerator.Seeds(),
-		EarthRadiusMeter: geo.EarthRadiusMeters,
+		Config:              effectiveConfig,
+		Bounds:              dataGenerator.Bounds(),
+		ProjectionOrigin:    dataGenerator.Origin(),
+		Seeds:               dataGenerator.Seeds(),
+		EarthRadiusMeter:    geo.EarthRadiusMeters,
 		GeneratedRiderCount: len(riders),
-		RiderPreview: previewRiders(riders, req.PreviewSize),
-		Index: selectMatcher.IndexStats(),
-		GOMAXPROCS: runtime.GOMAXPROCS(0),
+		RiderPreview:        previewRiders(riders, req.PreviewSize),
+		Index:               selectMatcher.IndexStats(),
+		GOMAXPROCS:          runtime.GOMAXPROCS(0),
 		Timing: Timing{
 			RiderGeneration: riderGenerationDuration,
-			IndexBuild: indexBuildDuration,
+			IndexBuild:      indexBuildDuration,
 		},
 	}
 
-
 	options := pipeline.Options{
-		Workers: effectiveConfig.Workers,
-		BatchSize: effectiveConfig.BatchSize,
-		ChannelCapacity: effectiveConfig.ChannelCapacity,
-		ExpectedOrders: expectedOrders,
-		PreviewSize: req.PreviewSize,
+		Workers:           effectiveConfig.Workers,
+		BatchSize:         effectiveConfig.BatchSize,
+		ChannelCapacity:   effectiveConfig.ChannelCapacity,
+		ExpectedOrders:    expectedOrders,
+		PreviewSize:       req.PreviewSize,
 		ObservationWindow: effectiveConfig.ArrivalWindow,
 	}
-
 
 	var pipelineResult pipeline.Result
 	var pipelineError error
@@ -220,7 +218,7 @@ func Run(ctx context.Context, req Request) (ret Result, resultErr error) {
 	var pipelineOperation string
 
 	switch effectiveConfig.Strategy {
-	case config.StrategyNearest: 
+	case config.StrategyNearest:
 		memoryEsti, err := pipeline.EstimateMemory(effectiveConfig.RiderCount, options)
 		if err != nil {
 			return ret, fmt.Errorf("estimate nearest pipeline memory: %w", err)
@@ -231,25 +229,23 @@ func Run(ctx context.Context, req Request) (ret Result, resultErr error) {
 		pipelineStarted := time.Now()
 
 		pipelineResult, pipelineError = pipeline.Run(runContext, orderSource, selectMatcher, riders, options)
-		
-		pipelineDuration = time.Since(pipelineStarted)
-		
 
+		pipelineDuration = time.Since(pipelineStarted)
 
 		pipelineOperation = "nearest"
 
 	case config.StrategyBalanced:
 		balancedOptions := pipeline.BalancedOptions{
-			Options: options,
-			TopK: effectiveConfig.TopK,
+			Options:                options,
+			TopK:                   effectiveConfig.TopK,
 			MaxExtraDistanceMeters: effectiveConfig.MaxExtraDistanceMeters,
-			MaxOrdersPerRider: effectiveConfig.MaxOrdersPerRider,
-			AssignmentWindow: effectiveConfig.ArrivalWindow,
-			Attempt: uint32(effectiveConfig.Attempt),
+			MaxOrdersPerRider:      effectiveConfig.MaxOrdersPerRider,
+			AssignmentWindow:       effectiveConfig.ArrivalWindow,
+			Attempt:                uint32(effectiveConfig.Attempt),
 		}
 
 		memoryEsti, err := pipeline.EstimateBalancedMemory(effectiveConfig.RiderCount, balancedOptions)
-		
+
 		if err != nil {
 			return ret, fmt.Errorf("estimate balanced pipeline memory: %w", err)
 		}
@@ -264,20 +260,16 @@ func Run(ctx context.Context, req Request) (ret Result, resultErr error) {
 
 		pipelineDuration = time.Since(pipelineStart)
 
-
-
-
 	default:
 		return ret, fmt.Errorf("unsupported strategy")
 	}
-
 
 	ret.Timing.Pipeline = pipelineDuration
 
 	ret.Pipeline = pipelineResult
 
 	if pipelineError != nil {
-		return ret, fmt.Errorf("run %s pipeline: %w", pipelineOperation,pipelineError)
+		return ret, fmt.Errorf("run %s pipeline: %w", pipelineOperation, pipelineError)
 	}
 
 	if pipelineDuration > 0 {
@@ -285,10 +277,9 @@ func Run(ctx context.Context, req Request) (ret Result, resultErr error) {
 		ret.Timing.ThroughputPerSecond = throughput
 	}
 
-
 	ret.Resources = resourceMonitor.Stop()
 	monitorStopped = true
 	ret.Timing.Total = time.Since(totalstarted)
 
-	return  ret, nil
+	return ret, nil
 }

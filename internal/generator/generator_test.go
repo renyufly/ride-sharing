@@ -2,11 +2,11 @@ package generator
 
 import (
 	"reflect"
+	"ride-sharing/internal/domain/order"
 	"testing"
 	"time"
 
-	"ride-sharing/internal/geo"
-	"ride-sharing/internal/model"
+	"ride-sharing/internal/domain/geo"
 )
 
 func TestGeneratorIsReproducible(t *testing.T) {
@@ -137,28 +137,28 @@ func mustGenerator(t *testing.T, seed int64) Generator {
 	return generator
 }
 
-func readOrders(t *testing.T, generator Generator, count int, arrival ArrivalModel, distribution SpatialDistribution) []model.Order {
+func readOrders(t *testing.T, generator Generator, count int, arrival ArrivalModel, distribution SpatialDistribution) []order.Order {
 	t.Helper()
 	return readOrdersInWindowWithDistribution(t, generator, count, 30*time.Second, arrival, distribution)
 }
 
-func readOrdersWithDistribution(t *testing.T, generator Generator, count int, arrival ArrivalModel, distribution SpatialDistribution) []model.Order {
+func readOrdersWithDistribution(t *testing.T, generator Generator, count int, arrival ArrivalModel, distribution SpatialDistribution) []order.Order {
 	t.Helper()
 	return readOrdersInWindowWithDistribution(t, generator, count, 30*time.Second, arrival, distribution)
 }
 
-func readOrdersInWindow(t *testing.T, generator Generator, count int, window time.Duration, arrival ArrivalModel) []model.Order {
+func readOrdersInWindow(t *testing.T, generator Generator, count int, window time.Duration, arrival ArrivalModel) []order.Order {
 	t.Helper()
 	return readOrdersInWindowWithDistribution(t, generator, count, window, arrival, DistributionUniform)
 }
 
-func readOrdersInWindowWithDistribution(t *testing.T, generator Generator, count int, window time.Duration, arrival ArrivalModel, distribution SpatialDistribution) []model.Order {
+func readOrdersInWindowWithDistribution(t *testing.T, generator Generator, count int, window time.Duration, arrival ArrivalModel, distribution SpatialDistribution) []order.Order {
 	t.Helper()
 	stream, err := generator.NewOrderStream(count, window, arrival, distribution)
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}
-	orders := make([]model.Order, 0, count)
+	orders := make([]order.Order, 0, count)
 	for {
 		order, ok, err := stream.Next()
 		if err != nil {
@@ -172,7 +172,7 @@ func readOrdersInWindowWithDistribution(t *testing.T, generator Generator, count
 	return orders
 }
 
-func assertPointAndProjection(t *testing.T, projector geo.Projector, location model.GeoPoint, point model.Point2D) {
+func assertPointAndProjection(t *testing.T, projector geo.Projector, location geo.GeoPoint, point geo.Point2D) {
 	t.Helper()
 	if !geo.SanFranciscoBounds.Contains(location) {
 		t.Fatalf("location %+v is outside bounds", location)
@@ -186,7 +186,7 @@ func assertPointAndProjection(t *testing.T, projector geo.Projector, location mo
 	}
 }
 
-func assertNonDecreasing(t *testing.T, orders []model.Order) {
+func assertNonDecreasing(t *testing.T, orders []order.Order) {
 	t.Helper()
 	for index := 1; index < len(orders); index++ {
 		if orders[index].PlannedArrivalNs < orders[index-1].PlannedArrivalNs {

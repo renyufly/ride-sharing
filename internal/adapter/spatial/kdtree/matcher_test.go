@@ -3,22 +3,23 @@ package kdtree
 import (
 	"math"
 	"reflect"
+	"ride-sharing/internal/domain/order"
+	"ride-sharing/internal/domain/rider"
 	"testing"
 	"time"
 
+	"ride-sharing/internal/adapter/spatial/bruteforce"
+	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/generator"
-	"ride-sharing/internal/geo"
-	"ride-sharing/internal/matcher/bruteforce"
-	"ride-sharing/internal/model"
 )
 
 func TestMatchReturnsGlobalNearestRider(t *testing.T) {
-	matcher := mustMatcher(t, []model.Rider{
-		{UID: 20, Point: model.Point2D{X: 10, Y: 10}},
-		{UID: 30, Point: model.Point2D{X: 2, Y: 3}},
-		{UID: 10, Point: model.Point2D{X: -5, Y: -5}},
+	matcher := mustMatcher(t, []rider.Rider{
+		{UID: 20, Point: geo.Point2D{X: 10, Y: 10}},
+		{UID: 30, Point: geo.Point2D{X: 2, Y: 3}},
+		{UID: 10, Point: geo.Point2D{X: -5, Y: -5}},
 	})
-	order := model.Order{ID: 1001, Sequence: 7, Point: model.Point2D{X: 1, Y: 1}}
+	order := order.Order{ID: 1001, Sequence: 7, Point: geo.Point2D{X: 1, Y: 1}}
 
 	assignment, err := matcher.Match(order)
 	if err != nil {
@@ -33,14 +34,14 @@ func TestMatchReturnsGlobalNearestRider(t *testing.T) {
 }
 
 func TestMatchDoesNotPruneSmallerUIDAtEqualDistance(t *testing.T) {
-	matcher := mustMatcher(t, []model.Rider{
-		{UID: 90, Point: model.Point2D{X: 0, Y: 1}},
-		{UID: 70, Point: model.Point2D{X: 1, Y: 0}},
-		{UID: 3, Point: model.Point2D{X: -1, Y: 0}},
-		{UID: 50, Point: model.Point2D{X: 0, Y: -1}},
+	matcher := mustMatcher(t, []rider.Rider{
+		{UID: 90, Point: geo.Point2D{X: 0, Y: 1}},
+		{UID: 70, Point: geo.Point2D{X: 1, Y: 0}},
+		{UID: 3, Point: geo.Point2D{X: -1, Y: 0}},
+		{UID: 50, Point: geo.Point2D{X: 0, Y: -1}},
 	})
 
-	assignment, err := matcher.Match(model.Order{Point: model.Point2D{}})
+	assignment, err := matcher.Match(order.Order{Point: geo.Point2D{}})
 	if err != nil {
 		t.Fatalf("Match() error = %v", err)
 	}
@@ -50,16 +51,16 @@ func TestMatchDoesNotPruneSmallerUIDAtEqualDistance(t *testing.T) {
 }
 
 func TestDuplicateCoordinatesAndDegenerateDistribution(t *testing.T) {
-	riders := make([]model.Rider, 127)
+	riders := make([]rider.Rider, 127)
 	for index := range riders {
-		riders[index] = model.Rider{
+		riders[index] = rider.Rider{
 			UID:   uint64(127 - index),
-			Point: model.Point2D{X: 12.5, Y: -8.25},
+			Point: geo.Point2D{X: 12.5, Y: -8.25},
 		}
 	}
 	matcher := mustMatcher(t, riders)
 
-	assignment, err := matcher.Match(model.Order{Point: model.Point2D{X: 12.5, Y: -8.25}})
+	assignment, err := matcher.Match(order.Order{Point: geo.Point2D{X: 12.5, Y: -8.25}})
 	if err != nil {
 		t.Fatalf("Match() error = %v", err)
 	}
@@ -134,13 +135,13 @@ func TestTopKMatchesBruteForceAndIsStable(t *testing.T) {
 }
 
 func TestTopKBreaksEqualDistanceByUID(t *testing.T) {
-	riders := []model.Rider{
-		{UID: 9, Point: model.Point2D{X: 1}},
-		{UID: 3, Point: model.Point2D{X: -1}},
-		{UID: 7, Point: model.Point2D{Y: 1}},
-		{UID: 1, Point: model.Point2D{Y: -1}},
+	riders := []rider.Rider{
+		{UID: 9, Point: geo.Point2D{X: 1}},
+		{UID: 3, Point: geo.Point2D{X: -1}},
+		{UID: 7, Point: geo.Point2D{Y: 1}},
+		{UID: 1, Point: geo.Point2D{Y: -1}},
 	}
-	candidates, err := mustMatcher(t, riders).TopK(model.Order{}, 3)
+	candidates, err := mustMatcher(t, riders).TopK(order.Order{}, 3)
 	if err != nil {
 		t.Fatalf("TopK() error = %v", err)
 	}
@@ -170,7 +171,7 @@ func TestMatchesBruteForceOnBoundaryOrders(t *testing.T) {
 		t.Fatalf("geo.NewProjector() error = %v", err)
 	}
 
-	locations := []model.GeoPoint{
+	locations := []geo.GeoPoint{
 		{Latitude: geo.SanFranciscoBounds.MinLatitude, Longitude: geo.SanFranciscoBounds.MinLongitude},
 		{Latitude: geo.SanFranciscoBounds.MinLatitude, Longitude: geo.SanFranciscoBounds.MaxLongitude},
 		{Latitude: geo.SanFranciscoBounds.MaxLatitude, Longitude: geo.SanFranciscoBounds.MinLongitude},
@@ -181,7 +182,7 @@ func TestMatchesBruteForceOnBoundaryOrders(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Project() error = %v", err)
 		}
-		compareOne(t, baseline, tree, model.Order{ID: uint64(sequence + 1), Sequence: uint64(sequence), Pickup: location, Point: point})
+		compareOne(t, baseline, tree, order.Order{ID: uint64(sequence + 1), Sequence: uint64(sequence), Pickup: location, Point: point})
 	}
 }
 
@@ -206,10 +207,10 @@ func TestTreeBoundsContainEveryNodeAndChild(t *testing.T) {
 }
 
 func TestNewRejectsInvalidRidersAndMatchRejectsInvalidOrder(t *testing.T) {
-	tests := [][]model.Rider{
+	tests := [][]rider.Rider{
 		nil,
 		{{UID: 1}, {UID: 1}},
-		{{UID: 1, Point: model.Point2D{X: math.NaN()}}},
+		{{UID: 1, Point: geo.Point2D{X: math.NaN()}}},
 	}
 	for _, riders := range tests {
 		if _, err := New(riders); err == nil {
@@ -217,18 +218,18 @@ func TestNewRejectsInvalidRidersAndMatchRejectsInvalidOrder(t *testing.T) {
 		}
 	}
 
-	matcher := mustMatcher(t, []model.Rider{{UID: 1}})
-	if _, err := matcher.Match(model.Order{ID: 9, Point: model.Point2D{Y: math.Inf(1)}}); err == nil {
+	matcher := mustMatcher(t, []rider.Rider{{UID: 1}})
+	if _, err := matcher.Match(order.Order{ID: 9, Point: geo.Point2D{Y: math.Inf(1)}}); err == nil {
 		t.Fatal("Match(non-finite order) error = nil")
 	}
 }
 
 func TestNewOwnsRiderCoordinates(t *testing.T) {
-	riders := []model.Rider{{UID: 1, Point: model.Point2D{X: 1}}, {UID: 2, Point: model.Point2D{X: 10}}}
+	riders := []rider.Rider{{UID: 1, Point: geo.Point2D{X: 1}}, {UID: 2, Point: geo.Point2D{X: 10}}}
 	matcher := mustMatcher(t, riders)
 	riders[0].Point.X = 1_000
 
-	assignment, err := matcher.Match(model.Order{Point: model.Point2D{}})
+	assignment, err := matcher.Match(order.Order{Point: geo.Point2D{}})
 	if err != nil {
 		t.Fatalf("Match() error = %v", err)
 	}
@@ -269,7 +270,7 @@ func compareGeneratedMatchers(t *testing.T, riderCount, orderCount int, riderDis
 	}
 }
 
-func compareOne(t *testing.T, baseline bruteforce.Matcher, tree Matcher, order model.Order) {
+func compareOne(t *testing.T, baseline bruteforce.Matcher, tree Matcher, order order.Order) {
 	t.Helper()
 	want, err := baseline.Match(order)
 	if err != nil {
@@ -284,7 +285,7 @@ func compareOne(t *testing.T, baseline bruteforce.Matcher, tree Matcher, order m
 	}
 }
 
-func mustMatcher(t *testing.T, riders []model.Rider) Matcher {
+func mustMatcher(t *testing.T, riders []rider.Rider) Matcher {
 	t.Helper()
 	matcher, err := New(riders)
 	if err != nil {

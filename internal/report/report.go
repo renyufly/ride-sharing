@@ -7,9 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"ride-sharing/internal/domain/matching"
+	"ride-sharing/internal/domain/rider"
 	"sort"
-
-	"ride-sharing/internal/model"
 )
 
 // 统计与验收模块
@@ -17,8 +17,8 @@ import (
 // 最少的 10 个是谁？匹配距离怎么样？负载是否均衡？
 
 const (
-	bottomLimit                = 10   // 输出分配订单最少的后 10 名骑手
-	distanceHistogramMaxMeters = 50_000  // 距离直方图统计到 50KM
+	bottomLimit                = 10     // 输出分配订单最少的后 10 名骑手
+	distanceHistogramMaxMeters = 50_000 // 距离直方图统计到 50KM
 )
 
 // 估算 每个 worker 私有统计数据大约占多少内存
@@ -72,7 +72,7 @@ type Accumulator struct {
 	distanceHistogramOverflow uint64
 }
 
-func New(riders []model.Rider) (*Accumulator, error) {
+func New(riders []rider.Rider) (*Accumulator, error) {
 	if len(riders) == 0 {
 		return nil, errors.New("at least one rider is required for reporting")
 	}
@@ -99,9 +99,9 @@ func New(riders []model.Rider) (*Accumulator, error) {
 // 线程/协程本地统计 + 最终归并
 func (a *Accumulator) Fork() *Accumulator {
 	return &Accumulator{
-		riderIndex:        a.riderIndex,  // 只读数据，可安全共享
+		riderIndex:        a.riderIndex, // 只读数据，可安全共享
 		riderUIDs:         a.riderUIDs,
-		riderCounts:       make([]uint64, len(a.riderCounts)),  // 每个worker要创建自己的local
+		riderCounts:       make([]uint64, len(a.riderCounts)), // 每个worker要创建自己的local
 		distanceHistogram: make([]uint64, len(a.distanceHistogram)),
 	}
 }
@@ -109,7 +109,7 @@ func (a *Accumulator) Fork() *Accumulator {
 // Observe records one final assignment. It performs the only square root in
 // the matching/reporting path, after the winning rider has been selected.
 // 每完成一单匹配就调用一次，开始统计
-func (a *Accumulator) Observe(assignment model.Assignment) error {
+func (a *Accumulator) Observe(assignment matching.Assignment) error {
 	index, exists := a.riderIndex[assignment.RiderUID]
 	if !exists {
 		return fmt.Errorf("assignment references unknown rider UID %d", assignment.RiderUID)
@@ -197,7 +197,7 @@ func (a *Accumulator) Summary() Summary {
 			zeroRiders++
 		}
 		if count < minOrders {
-			minOrders = count  // 最小订单数
+			minOrders = count // 最小订单数
 		}
 		if count > maxOrders {
 			maxOrders = count

@@ -4,27 +4,29 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"ride-sharing/internal/domain/geo"
+	"ride-sharing/internal/domain/matching"
+	"ride-sharing/internal/domain/order"
+	"ride-sharing/internal/domain/rider"
 	"testing"
 	"time"
 
-	matchrule "ride-sharing/internal/matcher"
-	"ride-sharing/internal/matcher/kdtree"
-	"ride-sharing/internal/model"
+	"ride-sharing/internal/adapter/spatial/kdtree"
 )
 
 func TestBalancedCoordinatorUsesLoadThenDistanceThenUID(t *testing.T) {
-	riders := []model.Rider{
-		{UID: 1, Point: model.Point2D{X: 0}},
-		{UID: 2, Point: model.Point2D{X: 10}},
+	riders := []rider.Rider{
+		{UID: 1, Point: geo.Point2D{X: 0}},
+		{UID: 2, Point: geo.Point2D{X: 10}},
 	}
 	matcher, err := kdtree.New(riders)
 	if err != nil {
 		t.Fatalf("kdtree.New() error = %v", err)
 	}
-	orders := []model.Order{
-		{ID: 10, Sequence: 0, Point: model.Point2D{X: 0}},
-		{ID: 11, Sequence: 1, Point: model.Point2D{X: 0}},
-		{ID: 12, Sequence: 2, Point: model.Point2D{X: 0}},
+	orders := []order.Order{
+		{ID: 10, Sequence: 0, Point: geo.Point2D{X: 0}},
+		{ID: 11, Sequence: 1, Point: geo.Point2D{X: 0}},
+		{ID: 12, Sequence: 2, Point: geo.Point2D{X: 0}},
 	}
 	result, err := RunBalanced(context.Background(), &sliceSource{orders: orders}, matcher, riders, BalancedOptions{
 		Options: Options{Workers: 2, BatchSize: 1, ChannelCapacity: 2, ExpectedOrders: 3, PreviewSize: 3},
@@ -43,9 +45,9 @@ func TestBalancedCoordinatorUsesLoadThenDistanceThenUID(t *testing.T) {
 }
 
 func TestBalancedRespectsMaximumExtraDistance(t *testing.T) {
-	riders := []model.Rider{
-		{UID: 1, Point: model.Point2D{X: 0}},
-		{UID: 2, Point: model.Point2D{X: 100}},
+	riders := []rider.Rider{
+		{UID: 1, Point: geo.Point2D{X: 0}},
+		{UID: 2, Point: geo.Point2D{X: 100}},
 	}
 	matcher, err := kdtree.New(riders)
 	if err != nil {
@@ -66,29 +68,29 @@ func TestBalancedRespectsMaximumExtraDistance(t *testing.T) {
 }
 
 func TestBalancedReordersCandidateResultsDeterministically(t *testing.T) {
-	riders := []model.Rider{
-		{UID: 1, Point: model.Point2D{X: 0}},
-		{UID: 2, Point: model.Point2D{X: 1}},
-		{UID: 3, Point: model.Point2D{X: 2}},
+	riders := []rider.Rider{
+		{UID: 1, Point: geo.Point2D{X: 0}},
+		{UID: 2, Point: geo.Point2D{X: 1}},
+		{UID: 3, Point: geo.Point2D{X: 2}},
 	}
 	base, err := kdtree.New(riders)
 	if err != nil {
 		t.Fatalf("kdtree.New() error = %v", err)
 	}
-	orders := make([]model.Order, 60)
+	orders := make([]order.Order, 60)
 	for index := range orders {
-		orders[index] = model.Order{ID: uint64(100 + index), Sequence: uint64(index), Point: model.Point2D{X: 0.5}}
+		orders[index] = order.Order{ID: uint64(100 + index), Sequence: uint64(index), Point: geo.Point2D{X: 0.5}}
 	}
 	options := BalancedOptions{
 		Options: Options{Workers: 4, BatchSize: 1, ChannelCapacity: 4, ExpectedOrders: uint64(len(orders)), PreviewSize: len(orders)},
 		TopK:    3, MaxExtraDistanceMeters: 10,
 	}
 
-	first, err := RunBalanced(context.Background(), &sliceSource{orders: append([]model.Order(nil), orders...)}, delayedCandidateMatcher{matcher: base}, riders, options)
+	first, err := RunBalanced(context.Background(), &sliceSource{orders: append([]order.Order(nil), orders...)}, delayedCandidateMatcher{matcher: base}, riders, options)
 	if err != nil {
 		t.Fatalf("first RunBalanced() error = %v", err)
 	}
-	second, err := RunBalanced(context.Background(), &sliceSource{orders: append([]model.Order(nil), orders...)}, delayedCandidateMatcher{matcher: base}, riders, options)
+	second, err := RunBalanced(context.Background(), &sliceSource{orders: append([]order.Order(nil), orders...)}, delayedCandidateMatcher{matcher: base}, riders, options)
 	if err != nil {
 		t.Fatalf("second RunBalanced() error = %v", err)
 	}
@@ -151,7 +153,7 @@ func TestBalancedRunDoesNotChangeNearestStrategy(t *testing.T) {
 }
 
 func TestBalancedCancellationStopsAllStages(t *testing.T) {
-	riders := []model.Rider{{UID: 1}}
+	riders := []rider.Rider{{UID: 1}}
 	base, err := kdtree.New(riders)
 	if err != nil {
 		t.Fatalf("kdtree.New() error = %v", err)
@@ -175,7 +177,7 @@ func TestBalancedCancellationStopsAllStages(t *testing.T) {
 }
 
 func TestBalancedCandidatePanicIsReported(t *testing.T) {
-	riders := []model.Rider{{UID: 1}}
+	riders := []rider.Rider{{UID: 1}}
 	result, err := RunBalanced(context.Background(), newSliceSource(20), panicCandidateMatcher{panicSequence: 5}, riders, BalancedOptions{
 		Options: Options{Workers: 2, BatchSize: 1, ChannelCapacity: 2, ExpectedOrders: 20},
 		TopK:    1,
@@ -198,7 +200,7 @@ type slowCandidateMatcher struct {
 	delay   time.Duration
 }
 
-func (m slowCandidateMatcher) TopKInto(order model.Order, limit int, destination []matchrule.Candidate) ([]matchrule.Candidate, error) {
+func (m slowCandidateMatcher) TopKInto(order order.Order, limit int, destination []matching.Candidate) ([]matching.Candidate, error) {
 	time.Sleep(m.delay)
 	return m.matcher.TopKInto(order, limit, destination)
 }
@@ -207,14 +209,14 @@ type panicCandidateMatcher struct {
 	panicSequence uint64
 }
 
-func (m panicCandidateMatcher) TopKInto(order model.Order, _ int, destination []matchrule.Candidate) ([]matchrule.Candidate, error) {
+func (m panicCandidateMatcher) TopKInto(order order.Order, _ int, destination []matching.Candidate) ([]matching.Candidate, error) {
 	if order.Sequence == m.panicSequence {
 		panic("candidate boom")
 	}
-	return append(destination[:0], matchrule.Candidate{RiderUID: 1}), nil
+	return append(destination[:0], matching.Candidate{RiderUID: 1}), nil
 }
 
-func (m delayedCandidateMatcher) TopKInto(order model.Order, limit int, destination []matchrule.Candidate) ([]matchrule.Candidate, error) {
+func (m delayedCandidateMatcher) TopKInto(order order.Order, limit int, destination []matching.Candidate) ([]matching.Candidate, error) {
 	if order.Sequence%7 == 0 {
 		time.Sleep(2 * time.Millisecond)
 	}

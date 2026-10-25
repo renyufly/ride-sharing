@@ -8,24 +8,24 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"ride-sharing/internal/model"
+	"ride-sharing/internal/domain/order"
 )
 
 // 只保存当前扫描位置
 type FileSource struct {
-	file             *os.File
-	scanner          *bufio.Scanner
-	filePath         string
-	nextSequence     uint64
-	lineNumber       uint64
-	expectedAttempt  uint32
-	expectedCount    uint64
-	closed           bool
+	file            *os.File
+	scanner         *bufio.Scanner
+	filePath        string
+	nextSequence    uint64
+	lineNumber      uint64
+	expectedAttempt uint32
+	expectedCount   uint64
+	closed          bool
 }
 
 const (
-	InitBufferSize = 64*1024  // 64 KB
-	MaxLineSize = 1024*1024  // 1MB
+	InitBufferSize = 64 * 1024   // 64 KB
+	MaxLineSize    = 1024 * 1024 // 1MB
 )
 
 func newJSONLScanner(reader io.Reader) *bufio.Scanner {
@@ -46,7 +46,7 @@ func inspectFile(filePath string, expectedAttempt uint32) (recordCount uint64, r
 	if filePath == "" {
 		return 0, fmt.Errorf("deferred input path cannot be empty")
 	}
-	
+
 	if expectedAttempt == 0 {
 		return 0, fmt.Errorf("expected input attempt must be greater than zero")
 	}
@@ -70,7 +70,7 @@ func inspectFile(filePath string, expectedAttempt uint32) (recordCount uint64, r
 	var lineNumber uint64 = 0
 
 	for scanner.Scan() {
-		lineNumber++  // 行数
+		lineNumber++ // 行数
 
 		// scanner.Bytes() 返回的内容只在下一次 Scan() 前有效
 		line := bytes.TrimSpace(scanner.Bytes())
@@ -81,7 +81,7 @@ func inspectFile(filePath string, expectedAttempt uint32) (recordCount uint64, r
 
 		record := deferredRecord{}
 
-		if err:= json.Unmarshal(line, &record); err != nil {
+		if err := json.Unmarshal(line, &record); err != nil {
 			return 0, fmt.Errorf("decode deferred input %s, line %d, %s", filePath, lineNumber, err)
 		}
 
@@ -132,11 +132,11 @@ func OpenFileSource(filePath string, expectedAttempt uint32) (*FileSource, uint6
 	scanner := newJSONLScanner(file)
 
 	fileSource := FileSource{
-		file: file,
-		scanner: scanner,
-		filePath: filePath,
+		file:            file,
+		scanner:         scanner,
+		filePath:        filePath,
 		expectedAttempt: expectedAttempt,
-		expectedCount: count,
+		expectedCount:   count,
 	}
 
 	return &fileSource, count, nil
@@ -144,21 +144,21 @@ func OpenFileSource(filePath string, expectedAttempt uint32) (*FileSource, uint6
 }
 
 // 实现 pipeline.OrderSource interface
-func (s *FileSource) Next() (model.Order, bool, error) {
+func (s *FileSource) Next() (order.Order, bool, error) {
 	if s.closed {
-		return model.Order{}, false, fmt.Errorf("wrong closed file")
+		return order.Order{}, false, fmt.Errorf("wrong closed file")
 	}
 
 	if s.scanner.Scan() == false {
 		if s.scanner.Err() != nil {
-			return model.Order{}, false, fmt.Errorf("wrong read")
+			return order.Order{}, false, fmt.Errorf("wrong read")
 		}
 
 		if s.nextSequence != s.expectedCount {
-			return model.Order{}, false, fmt.Errorf("wrong order count")
+			return order.Order{}, false, fmt.Errorf("wrong order count")
 		}
 
-		return model.Order{}, false, nil
+		return order.Order{}, false, nil
 	}
 
 	s.lineNumber++
@@ -166,8 +166,8 @@ func (s *FileSource) Next() (model.Order, bool, error) {
 	record := deferredRecord{}
 
 	line := bytes.TrimSpace(s.scanner.Bytes())
-	if err:= json.Unmarshal(line, &record); err != nil {
-		return model.Order{}, false, fmt.Errorf("decode deferred input %s, line %d, %s", s.filePath, s.lineNumber, err)
+	if err := json.Unmarshal(line, &record); err != nil {
+		return order.Order{}, false, fmt.Errorf("decode deferred input %s, line %d, %s", s.filePath, s.lineNumber, err)
 	}
 
 	order := toModelOrder(record, s.nextSequence)
@@ -175,7 +175,7 @@ func (s *FileSource) Next() (model.Order, bool, error) {
 	s.nextSequence++
 
 	return order, true, nil
-	
+
 }
 
 func (s *FileSource) Close() error {
@@ -185,7 +185,7 @@ func (s *FileSource) Close() error {
 
 	s.closed = true
 
-	if err:= s.file.Close(); err != nil {
+	if err := s.file.Close(); err != nil {
 		return fmt.Errorf("error in closing %s, %s", s.filePath, err)
 	}
 

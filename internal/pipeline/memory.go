@@ -2,9 +2,10 @@ package pipeline
 
 import (
 	"errors"
+	"ride-sharing/internal/domain/order"
+	"ride-sharing/internal/domain/rider"
 	"unsafe"
 
-	"ride-sharing/internal/model"
 	"ride-sharing/internal/report"
 )
 
@@ -34,8 +35,8 @@ func EstimateMemory(riderCount int, options Options) (MemoryEstimate, error) {
 		return MemoryEstimate{}, errors.New("workers, batch size, and channel capacity must be greater than zero")
 	}
 
-	orderSize := uint64(unsafe.Sizeof(model.Order{}))
-	riderSize := uint64(unsafe.Sizeof(model.Rider{}))
+	orderSize := uint64(unsafe.Sizeof(order.Order{}))
+	riderSize := uint64(unsafe.Sizeof(rider.Rider{}))
 	bufferCount := options.ChannelCapacity + options.Workers
 	workerMemory := report.EstimateWorkerMemory(riderCount)
 

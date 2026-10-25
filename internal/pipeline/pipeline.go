@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"ride-sharing/internal/domain/matching"
+	"ride-sharing/internal/domain/order"
+	"ride-sharing/internal/domain/rider"
 	"runtime"
 	"runtime/debug"
 	"sort"
@@ -12,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ride-sharing/internal/model"
 	"ride-sharing/internal/report"
 )
 
@@ -25,20 +27,20 @@ import (
 
 // pipeline 不关心具体实现
 type OrderSource interface {
-	Next() (model.Order, bool, error)
+	Next() (order.Order, bool, error)
 }
 
 type Matcher interface {
-	Match(model.Order) (model.Assignment, error)
+	Match(order.Order) (matching.Assignment, error)
 }
 
 // 控制整个并发流水线
 type Options struct {
-	Workers         int  // worker goroutine 数量
-	BatchSize       int  // 一次通过 channel 传多少订单
-	ChannelCapacity int  // 限制 channel 最多缓存多少个 batch (一个 bounded channel)
-	ExpectedOrders  uint64
-	PreviewSize     int
+	Workers           int // worker goroutine 数量
+	BatchSize         int // 一次通过 channel 传多少订单
+	ChannelCapacity   int // 限制 channel 最多缓存多少个 batch (一个 bounded channel)
+	ExpectedOrders    uint64
+	PreviewSize       int
 	ObservationWindow time.Duration // 从 Pipeline 开始运行,观察和统计前 X 秒运行的订单数量的时间范围
 }
 
@@ -64,27 +66,27 @@ func (o Options) Validate() error {
 }
 
 type Result struct {
-	GeneratedOrders      uint64             `json:"generatedOrders"`
-	AdmittedOrders       uint64             `json:"admittedOrders"`
-	CompletedOrders      uint64             `json:"completedOrders"`  // 成功分配的订单
-	UnfinishedOrders     uint64             `json:"unfinishedOrders"` //  未分配，推迟 DeferredOrders
-	LastPlannedArrivalNs int64              `json:"lastPlannedArrivalNs"`
-	MaxQueueDepth        int                `json:"maxQueueDepthBatches"`
-	Performance          PerformanceMetrics `json:"performance"`
-	StrategyDetails      *StrategyMetrics   `json:"strategyDetails,omitempty"`
-	WorkerCompleted      []uint64           `json:"workerCompletedOrders"`
-	OrderPreview         []model.Order      `json:"-"`
-	AssignmentPreview    []model.Assignment `json:"-"`
-	Report               report.Summary     `json:"report"`
-	GeneratedWithinWindow uint64    		`json:"generatedWithinWindow"`
-	AdmittedWithinWindow  uint64 			`json:"admittedWithinWindow"`
-	CompletedWithinWindow uint64            `json:"completedWithinWindow"`
-	DeferredOrders      uint64				`json:"deferredOrders"`
-	DeferredByCapacity  uint64				`json:"deferredByCapacity"`
-	DeferredByWindow    uint64				`json:"deferredByWindow"`
-	DeferredPreview     []DeferredOrder		`json:"deferredPreview"`
-	MaxOrdersPerRider   int 				`json:"maxOrdersPerRider"`
-	CapacityFilteredCandidates uint64       `json:"capacityFilteredCandidates"`
+	GeneratedOrders            uint64                `json:"generatedOrders"`
+	AdmittedOrders             uint64                `json:"admittedOrders"`
+	CompletedOrders            uint64                `json:"completedOrders"`  // 成功分配的订单
+	UnfinishedOrders           uint64                `json:"unfinishedOrders"` //  未分配，推迟 DeferredOrders
+	LastPlannedArrivalNs       int64                 `json:"lastPlannedArrivalNs"`
+	MaxQueueDepth              int                   `json:"maxQueueDepthBatches"`
+	Performance                PerformanceMetrics    `json:"performance"`
+	StrategyDetails            *StrategyMetrics      `json:"strategyDetails,omitempty"`
+	WorkerCompleted            []uint64              `json:"workerCompletedOrders"`
+	OrderPreview               []order.Order         `json:"-"`
+	AssignmentPreview          []matching.Assignment `json:"-"`
+	Report                     report.Summary        `json:"report"`
+	GeneratedWithinWindow      uint64                `json:"generatedWithinWindow"`
+	AdmittedWithinWindow       uint64                `json:"admittedWithinWindow"`
+	CompletedWithinWindow      uint64                `json:"completedWithinWindow"`
+	DeferredOrders             uint64                `json:"deferredOrders"`
+	DeferredByCapacity         uint64                `json:"deferredByCapacity"`
+	DeferredByWindow           uint64                `json:"deferredByWindow"`
+	DeferredPreview            []DeferredOrder       `json:"deferredPreview"`
+	MaxOrdersPerRider          int                   `json:"maxOrdersPerRider"`
+	CapacityFilteredCandidates uint64                `json:"capacityFilteredCandidates"`
 }
 
 type StrategyMetrics struct {
@@ -97,24 +99,24 @@ type StrategyMetrics struct {
 }
 
 type PerformanceMetrics struct {
-	PlannedArrivalWindowNs int64          `json:"plannedArrivalWindowNs"`
-	ActualInjectionNs      int64          `json:"actualInjectionNs"`
-	InjectionOverrunNs     int64          `json:"injectionOverrunNs"`
-	DrainAfterWindowNs     int64          `json:"drainAfterWindowNs"`
-	TotalRunNs             int64          `json:"totalRunNs"`
-	ActualAdmissionRate    float64        `json:"actualAdmissionRatePerSecond"`
-	ActualCompletionRate   float64        `json:"actualCompletionRatePerSecond"`
-	AdmissionDelay         LatencySummary `json:"admissionDelay"`
-	QueueAndMatchLatency   LatencySummary `json:"queueAndMatchLatency"`
-	EndToEndLatency        LatencySummary `json:"endToEndLatency"`
+	PlannedArrivalWindowNs      int64                       `json:"plannedArrivalWindowNs"`
+	ActualInjectionNs           int64                       `json:"actualInjectionNs"`
+	InjectionOverrunNs          int64                       `json:"injectionOverrunNs"`
+	DrainAfterWindowNs          int64                       `json:"drainAfterWindowNs"`
+	TotalRunNs                  int64                       `json:"totalRunNs"`
+	ActualAdmissionRate         float64                     `json:"actualAdmissionRatePerSecond"`
+	ActualCompletionRate        float64                     `json:"actualCompletionRatePerSecond"`
+	AdmissionDelay              LatencySummary              `json:"admissionDelay"`
+	QueueAndMatchLatency        LatencySummary              `json:"queueAndMatchLatency"`
+	EndToEndLatency             LatencySummary              `json:"endToEndLatency"`
 	AlgorithmPerformanceMetrics AlgorithmPerformanceMetrics `json:"algorithmPerformanceMetrics"`
 }
 
 type AlgorithmPerformanceMetrics struct {
-	NearestSearch       LatencySummary  `json:"nearestSearch"` // 策略 A 只填写 NearestSearch
-    CandidateSearch     LatencySummary 	`json:"candidateSearch"`
-    AssignmentDecision  LatencySummary	`json:"assignmentDecision"`
-    AlgorithmCompute    LatencySummary	`json:"algorithmCompute"`
+	NearestSearch      LatencySummary `json:"nearestSearch"` // 策略 A 只填写 NearestSearch
+	CandidateSearch    LatencySummary `json:"candidateSearch"`
+	AssignmentDecision LatencySummary `json:"assignmentDecision"`
+	AlgorithmCompute   LatencySummary `json:"algorithmCompute"`
 }
 
 type RunError struct {
@@ -167,38 +169,38 @@ func (e *producerPanicError) Error() string {
 }
 
 type producerResult struct {
-	generated            uint64   // 已生成订单数量
-	admitted             uint64
-	lastPlannedArrivalNs int64
-	maxQueueDepth        int
-	lastAdmissionNs      int64
-	admissionLatency     latencyHistogram
-	preview              []model.Order
-	err                  error
-	generatedWithinWindow uint64  // 指定时间窗口内成功生成的订单数量
-	admittedWithinWindow uint64
+	generated             uint64 // 已生成订单数量
+	admitted              uint64
+	lastPlannedArrivalNs  int64
+	maxQueueDepth         int
+	lastAdmissionNs       int64
+	admissionLatency      latencyHistogram
+	preview               []order.Order
+	err                   error
+	generatedWithinWindow uint64 // 指定时间窗口内成功生成的订单数量
+	admittedWithinWindow  uint64
 }
 
 type workerResult struct {
-	workerID             int
-	completed            uint64
-	preview              []model.Assignment
-	reporter             *report.Accumulator
-	lastCompletionNs     int64
-	queueAndMatchLatency latencyHistogram
-	endToEndLatency      latencyHistogram
-	err                  error
+	workerID              int
+	completed             uint64
+	preview               []matching.Assignment
+	reporter              *report.Accumulator
+	lastCompletionNs      int64
+	queueAndMatchLatency  latencyHistogram
+	endToEndLatency       latencyHistogram
+	err                   error
 	completedWithinWindow uint64
-	nearestSearchLatency latencyHistogram
+	nearestSearchLatency  latencyHistogram
 }
 
 type admittedBatch struct {
-	orders     []model.Order
-	admittedNs atomic.Int64  // 保证 producer 和 worker 对这个值的并发访问是安全的
+	orders     []order.Order
+	admittedNs atomic.Int64 // 保证 producer 和 worker 对这个值的并发访问是安全的
 }
 
 // 整个 pipeline 的总指挥
-func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []model.Rider, options Options) (Result, error) {
+func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []rider.Rider, options Options) (Result, error) {
 	if ctx == nil {
 		return Result{}, errors.New("context cannot be nil")
 	}
@@ -235,11 +237,11 @@ func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []mode
 	// CSP 的核心思想就是：goroutine 尽量通过 channel 传递数据/所有权，
 	// 而不是所有 goroutine 随意共享可变状态
 	batchChannel := make(chan *admittedBatch, options.ChannelCapacity)
-	
+
 	bufferPool := make(chan *admittedBatch, options.ChannelCapacity+options.Workers)
 	for range cap(bufferPool) {
 		// 提前创建 batch
-		bufferPool <- &admittedBatch{orders: make([]model.Order, 0, options.BatchSize)}
+		bufferPool <- &admittedBatch{orders: make([]order.Order, 0, options.BatchSize)}
 	}
 	producerResults := make(chan producerResult, 1)
 	workerResults := make(chan workerResult, options.Workers)
@@ -282,7 +284,7 @@ func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []mode
 		LastPlannedArrivalNs: producerState.lastPlannedArrivalNs,
 		MaxQueueDepth:        producerState.maxQueueDepth,
 		WorkerCompleted:      make([]uint64, options.Workers),
-		OrderPreview:         append([]model.Order(nil), producerState.preview...),
+		OrderPreview:         append([]order.Order(nil), producerState.preview...),
 	}
 
 	result.GeneratedWithinWindow = producerState.generatedWithinWindow
@@ -298,8 +300,8 @@ func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []mode
 
 	// 遍历所有 workerResult
 	for _, state := range states {
-		result.CompletedOrders += state.completed  // 总的完成分配订单数
-		result.CompletedWithinWindow += state.completedWithinWindow 
+		result.CompletedOrders += state.completed // 总的完成分配订单数
+		result.CompletedWithinWindow += state.completedWithinWindow
 
 		result.WorkerCompleted[state.workerID] = state.completed
 		result.AssignmentPreview = append(result.AssignmentPreview, state.preview...)
@@ -373,7 +375,7 @@ func produce(
 	options Options,
 	results chan<- producerResult,
 ) {
-	state := producerResult{preview: make([]model.Order, 0, options.PreviewSize)}
+	state := producerResult{preview: make([]order.Order, 0, options.PreviewSize)}
 	var ownedBatch *admittedBatch
 	arrivalTimer := time.NewTimer(time.Hour)
 	if !arrivalTimer.Stop() {
@@ -420,11 +422,11 @@ func produce(
 				sourceEnded = true
 				break
 			}
-			state.generated++  // source.Next() 已经生成出来
-			
+			state.generated++ // source.Next() 已经生成出来
+
 			// Generator 完成订单对象创建的时间
 			generatedAt := time.Since(start)
-			if options.ObservationWindow > 0 && generatedAt < options.ObservationWindow{
+			if options.ObservationWindow > 0 && generatedAt < options.ObservationWindow {
 				state.generatedWithinWindow += 1
 			}
 
@@ -446,7 +448,7 @@ func produce(
 			case batches <- ownedBatch:
 				// batch 满了以后发送
 				admittedNs := time.Since(start).Nanoseconds()
-				
+
 				ownedBatch.admittedNs.Store(admittedNs + 1)
 				for _, order := range ownedBatch.orders {
 					state.admissionLatency.observe(admittedNs - order.PlannedArrivalNs)
@@ -492,10 +494,10 @@ func work(
 ) {
 	state := workerResult{
 		workerID: workerID,
-		preview:  make([]model.Assignment, 0, previewSize),
+		preview:  make([]matching.Assignment, 0, previewSize),
 		reporter: reporter,
 	}
-	var currentOrder model.Order
+	var currentOrder order.Order
 	var hasCurrentOrder bool
 	var ownedBatch *admittedBatch
 	var admittedNs int64
@@ -530,7 +532,7 @@ func work(
 			if !ok {
 				return
 			}
-			ownedBatch = batch  // worker 现在拥有这个 batch
+			ownedBatch = batch // worker 现在拥有这个 batch
 			for admittedNs = batch.admittedNs.Load(); admittedNs == 0; admittedNs = batch.admittedNs.Load() {
 				runtime.Gosched() // 现在先让其他 goroutine 有机会运行
 			}
@@ -579,7 +581,7 @@ func work(
 				return
 			}
 
-			state.completed++  // 已成功匹配的订单数量
+			state.completed++ // 已成功匹配的订单数量
 
 			// 纯最近邻搜索时间
 			state.nearestSearchLatency.observe(searchDuration.Nanoseconds())

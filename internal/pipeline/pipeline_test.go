@@ -4,15 +4,17 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"ride-sharing/internal/domain/matching"
+	"ride-sharing/internal/domain/order"
+	"ride-sharing/internal/domain/rider"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"ride-sharing/internal/adapter/spatial/kdtree"
+	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/generator"
-	"ride-sharing/internal/geo"
-	"ride-sharing/internal/matcher/kdtree"
-	"ride-sharing/internal/model"
 	"ride-sharing/internal/report"
 )
 
@@ -109,7 +111,7 @@ func TestCancellationReturnsPartialCountsAndStops(t *testing.T) {
 
 func TestWorkerPanicCancelsRunAndReportsOrderAndStack(t *testing.T) {
 	const orderCount = 50
-	riders := []model.Rider{{UID: 1}}
+	riders := []rider.Rider{{UID: 1}}
 	source := newSliceSource(orderCount)
 	panicSequence := uint64(7)
 
@@ -139,7 +141,7 @@ func TestWorkerPanicCancelsRunAndReportsOrderAndStack(t *testing.T) {
 
 func TestMatcherErrorCancelsWholeRun(t *testing.T) {
 	const orderCount = 30
-	riders := []model.Rider{{UID: 1}}
+	riders := []rider.Rider{{UID: 1}}
 	failSequence := uint64(5)
 	result, err := Run(context.Background(), newSliceSource(orderCount), &faultMatcher{errorAt: &failSequence}, riders, Options{
 		Workers:         2,
@@ -156,7 +158,7 @@ func TestMatcherErrorCancelsWholeRun(t *testing.T) {
 }
 
 func TestProducerErrorCancelsWorkers(t *testing.T) {
-	riders := []model.Rider{{UID: 1}}
+	riders := []rider.Rider{{UID: 1}}
 	source := &failingSource{remaining: 5}
 	result, err := Run(context.Background(), source, &faultMatcher{}, riders, Options{
 		Workers:         2,
@@ -173,8 +175,8 @@ func TestProducerErrorCancelsWorkers(t *testing.T) {
 }
 
 func TestProducerHonorsPlannedArrival(t *testing.T) {
-	riders := []model.Rider{{UID: 1}}
-	source := &sliceSource{orders: []model.Order{
+	riders := []rider.Rider{{UID: 1}}
+	source := &sliceSource{orders: []order.Order{
 		{ID: 1, Sequence: 0},
 		{ID: 2, Sequence: 1, PlannedArrivalNs: int64(30 * time.Millisecond)},
 	}}
@@ -209,7 +211,7 @@ func TestProducerHonorsPlannedArrival(t *testing.T) {
 }
 
 func TestRunValidatesInputs(t *testing.T) {
-	riders := []model.Rider{{UID: 1}}
+	riders := []rider.Rider{{UID: 1}}
 	validOptions := Options{Workers: 1, BatchSize: 1, ChannelCapacity: 1, ExpectedOrders: 1}
 	if _, err := Run(nil, newSliceSource(1), &faultMatcher{}, riders, validOptions); err == nil {
 		t.Fatal("Run(nil context) error = nil")
@@ -233,7 +235,7 @@ type trackingMatcher struct {
 	duplicate bool
 }
 
-func (m *trackingMatcher) Match(order model.Order) (model.Assignment, error) {
+func (m *trackingMatcher) Match(order order.Order) (matching.Assignment, error) {
 	if m.delay != 0 {
 		time.Sleep(m.delay)
 	}
@@ -268,14 +270,14 @@ type faultMatcher struct {
 	errorAt *uint64
 }
 
-func (m *faultMatcher) Match(order model.Order) (model.Assignment, error) {
+func (m *faultMatcher) Match(order order.Order) (matching.Assignment, error) {
 	if m.panicAt != nil && order.Sequence == *m.panicAt {
 		panic("intentional matcher panic")
 	}
 	if m.errorAt != nil && order.Sequence == *m.errorAt {
-		return model.Assignment{}, errors.New("intentional matcher error")
+		return matching.Assignment{}, errors.New("intentional matcher error")
 	}
-	return model.Assignment{
+	return matching.Assignment{
 		OrderID:               order.ID,
 		Sequence:              order.Sequence,
 		RiderUID:              1,
@@ -284,21 +286,21 @@ func (m *faultMatcher) Match(order model.Order) (model.Assignment, error) {
 }
 
 type sliceSource struct {
-	orders []model.Order
+	orders []order.Order
 	next   int
 }
 
 func newSliceSource(count int) *sliceSource {
-	orders := make([]model.Order, count)
+	orders := make([]order.Order, count)
 	for index := range orders {
-		orders[index] = model.Order{ID: 1_000 + uint64(index), Sequence: uint64(index)}
+		orders[index] = order.Order{ID: 1_000 + uint64(index), Sequence: uint64(index)}
 	}
 	return &sliceSource{orders: orders}
 }
 
-func (s *sliceSource) Next() (model.Order, bool, error) {
+func (s *sliceSource) Next() (order.Order, bool, error) {
 	if s.next >= len(s.orders) {
-		return model.Order{}, false, nil
+		return order.Order{}, false, nil
 	}
 	order := s.orders[s.next]
 	s.next++
@@ -310,17 +312,17 @@ type failingSource struct {
 	next      uint64
 }
 
-func (s *failingSource) Next() (model.Order, bool, error) {
+func (s *failingSource) Next() (order.Order, bool, error) {
 	if s.remaining == 0 {
-		return model.Order{}, false, errors.New("source failure")
+		return order.Order{}, false, errors.New("source failure")
 	}
-	order := model.Order{ID: s.next + 1, Sequence: s.next}
+	order := order.Order{ID: s.next + 1, Sequence: s.next}
 	s.next++
 	s.remaining--
 	return order, true, nil
 }
 
-func testData(t *testing.T, riderCount int) (generator.Generator, []model.Rider, kdtree.Matcher) {
+func testData(t *testing.T, riderCount int) (generator.Generator, []rider.Rider, kdtree.Matcher) {
 	t.Helper()
 	dataGenerator, err := generator.New(42, geo.SanFranciscoBounds)
 	if err != nil {
@@ -337,7 +339,7 @@ func testData(t *testing.T, riderCount int) (generator.Generator, []model.Rider,
 	return dataGenerator, riders, matcher
 }
 
-func serialSummary(t *testing.T, dataGenerator generator.Generator, matcher Matcher, riders []model.Rider, orderCount int) report.Summary {
+func serialSummary(t *testing.T, dataGenerator generator.Generator, matcher Matcher, riders []rider.Rider, orderCount int) report.Summary {
 	t.Helper()
 	stream, err := dataGenerator.NewOrderStream(orderCount, 0, generator.ArrivalUnbounded, generator.DistributionUniform)
 	if err != nil {

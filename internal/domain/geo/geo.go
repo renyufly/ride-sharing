@@ -6,14 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
-
-	"ride-sharing/internal/model"
 )
 
 // 骑手和订单原本是“经纬度”，但 KD-Tree / 最近邻算法更适合处理二维平面坐标，
 // 所以需要把经纬度转换成以“米”为单位的 (X, Y) 坐标
 
-const EarthRadiusMeters = 6_371_008.8  // 地球平均半径
+const EarthRadiusMeters = 6_371_008.8 // 地球平均半径
 
 // BoundingBox is an inclusive latitude/longitude rectangle.
 // 定义地图范围，表示一个矩形区域
@@ -35,7 +33,7 @@ var SanFranciscoBounds = BoundingBox{
 }
 
 // 检查经纬度是否合法
-func ValidatePoint(point model.GeoPoint) error {
+func ValidatePoint(point GeoPoint) error {
 	if math.IsNaN(point.Latitude) || math.IsInf(point.Latitude, 0) {
 		return errors.New("latitude must be finite")
 	}
@@ -52,10 +50,10 @@ func ValidatePoint(point model.GeoPoint) error {
 }
 
 func (b BoundingBox) Validate() error {
-	if err := ValidatePoint(model.GeoPoint{Latitude: b.MinLatitude, Longitude: b.MinLongitude}); err != nil {
+	if err := ValidatePoint(GeoPoint{Latitude: b.MinLatitude, Longitude: b.MinLongitude}); err != nil {
 		return fmt.Errorf("invalid minimum corner: %w", err)
 	}
-	if err := ValidatePoint(model.GeoPoint{Latitude: b.MaxLatitude, Longitude: b.MaxLongitude}); err != nil {
+	if err := ValidatePoint(GeoPoint{Latitude: b.MaxLatitude, Longitude: b.MaxLongitude}); err != nil {
 		return fmt.Errorf("invalid maximum corner: %w", err)
 	}
 	if b.MinLatitude >= b.MaxLatitude {
@@ -68,19 +66,18 @@ func (b BoundingBox) Validate() error {
 }
 
 // 求区域中心点：取平均值
-func (b BoundingBox) Center() model.GeoPoint {
-	return model.GeoPoint{
+func (b BoundingBox) Center() GeoPoint {
+	return GeoPoint{
 		Latitude:  (b.MinLatitude + b.MaxLatitude) / 2,
 		Longitude: (b.MinLongitude + b.MaxLongitude) / 2,
 	}
 }
 
 // 判断点是否在区域里面
-func (b BoundingBox) Contains(point model.GeoPoint) bool {
+func (b BoundingBox) Contains(point GeoPoint) bool {
 	return point.Latitude >= b.MinLatitude && point.Latitude <= b.MaxLatitude &&
 		point.Longitude >= b.MinLongitude && point.Longitude <= b.MaxLongitude
 }
-
 
 // Projector uses an equirectangular projection around one fixed origin. It is
 // suitable for the city-sized area used by this exercise.
@@ -88,13 +85,13 @@ func (b BoundingBox) Contains(point model.GeoPoint) bool {
 // 用的是一种简单的等距圆柱投影的局部近似
 // 把局部地球表面近似成二维平面，是这个 benchmark 为了性能与实现复杂度之间的平衡做出的选择
 type Projector struct {
-	origin          model.GeoPoint  // 把地图上的哪个经纬度定义成 (0,0)
+	origin          GeoPoint // 把地图上的哪个经纬度定义成 (0,0)
 	originLatitude  float64
 	originLongitude float64
 	longitudeScale  float64
 }
 
-func NewProjector(origin model.GeoPoint) (Projector, error) {
+func NewProjector(origin GeoPoint) (Projector, error) {
 	if err := ValidatePoint(origin); err != nil {
 		return Projector{}, fmt.Errorf("invalid projection origin: %w", err)
 	}
@@ -110,16 +107,16 @@ func NewProjector(origin model.GeoPoint) (Projector, error) {
 	}, nil
 }
 
-func (p Projector) Origin() model.GeoPoint {
+func (p Projector) Origin() GeoPoint {
 	return p.origin
 }
 
-func (p Projector) Project(point model.GeoPoint) (model.Point2D, error) {
+func (p Projector) Project(point GeoPoint) (Point2D, error) {
 	if err := ValidatePoint(point); err != nil {
-		return model.Point2D{}, err
+		return Point2D{}, err
 	}
 
-	return model.Point2D{
+	return Point2D{
 		X: EarthRadiusMeters * (degreesToRadians(point.Longitude) - p.originLongitude) * p.longitudeScale,
 		Y: EarthRadiusMeters * (degreesToRadians(point.Latitude) - p.originLatitude),
 	}, nil
@@ -128,4 +125,17 @@ func (p Projector) Project(point model.GeoPoint) (model.Point2D, error) {
 func degreesToRadians(degrees float64) float64 {
 	// radians = degrees × π / 180
 	return degrees * math.Pi / 180
+}
+
+// DistanceSquared returns the squared distance between projected points.
+func DistanceSquared(first, second Point2D) float64 {
+	deltaX := first.X - second.X
+	deltaY := first.Y - second.Y
+	return deltaX*deltaX + deltaY*deltaY
+}
+
+// IsFinitePoint reports whether both projected coordinates are finite.
+func IsFinitePoint(point Point2D) bool {
+	return !math.IsNaN(point.X) && !math.IsInf(point.X, 0) &&
+		!math.IsNaN(point.Y) && !math.IsInf(point.Y, 0)
 }

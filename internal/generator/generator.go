@@ -7,15 +7,16 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"ride-sharing/internal/domain/order"
+	"ride-sharing/internal/domain/rider"
 	"time"
 
-	"ride-sharing/internal/geo"
-	"ride-sharing/internal/model"
+	"ride-sharing/internal/domain/geo"
 )
 
 // 压测数据发生器
 
-type ArrivalModel string  // 订单什么时候到
+type ArrivalModel string // 订单什么时候到
 // uniform-window 均匀到达：订单均匀铺在整个 30 秒窗口
 // front-loaded-burst 前置突发流量：前 20% 时间到达 80% 的订单
 // unbounded 所有订单都可以立即进入系统 (测系统纯粹的最大吞吐能力, 不模拟真实到达时间)
@@ -25,7 +26,7 @@ const (
 	ArrivalUnbounded        ArrivalModel = "unbounded"
 )
 
-type SpatialDistribution string  // 骑手/订单在哪里
+type SpatialDistribution string // 骑手/订单在哪里
 // Uniform：完全随机分布
 // Hotspot：热点区域 (很符合网约车场景)
 // Skewed：偏斜分布 (极端不均衡的地理分布)
@@ -79,7 +80,7 @@ func (g Generator) Bounds() geo.BoundingBox {
 	return g.bounds
 }
 
-func (g Generator) Origin() model.GeoPoint {
+func (g Generator) Origin() geo.GeoPoint {
 	return g.projector.Origin()
 }
 
@@ -88,7 +89,7 @@ func (g Generator) Seeds() Seeds {
 }
 
 // 一次生成所有骑手
-func (g Generator) GenerateRiders(count int, distribution SpatialDistribution) ([]model.Rider, error) {
+func (g Generator) GenerateRiders(count int, distribution SpatialDistribution) ([]rider.Rider, error) {
 	if count <= 0 {
 		return nil, errors.New("rider count must be greater than zero")
 	}
@@ -97,7 +98,7 @@ func (g Generator) GenerateRiders(count int, distribution SpatialDistribution) (
 	}
 
 	random := rand.New(rand.NewSource(g.seeds.Rider))
-	riders := make([]model.Rider, count)
+	riders := make([]rider.Rider, count)
 
 	// 这里骑手数量相比千万订单小很多，
 	// 而且后面的匹配算法本来就需要长期持有骑手数据，
@@ -109,7 +110,7 @@ func (g Generator) GenerateRiders(count int, distribution SpatialDistribution) (
 		if err != nil {
 			return nil, fmt.Errorf("project rider %d: %w", index+1, err)
 		}
-		riders[index] = model.Rider{
+		riders[index] = rider.Rider{
 			UID:      uint64(index + 1),
 			Location: location,
 			Point:    point,
@@ -172,11 +173,11 @@ type OrderStream struct {
 //     ↓
 // 负责：
 // "真的什么时候把订单送进去"
-func (s *OrderStream) Next() (model.Order, bool, error) {
+func (s *OrderStream) Next() (order.Order, bool, error) {
 	// 返回值 bool 表示 还有没有订单
 
 	if s.nextSequence >= s.total {
-		return model.Order{}, false, nil
+		return order.Order{}, false, nil
 	}
 
 	sequence := s.nextSequence
@@ -185,11 +186,11 @@ func (s *OrderStream) Next() (model.Order, bool, error) {
 	location := samplePoint(s.random, s.bounds, s.distribution)
 	point, err := s.projector.Project(location)
 	if err != nil {
-		return model.Order{}, false, fmt.Errorf("project order sequence %d: %w", sequence, err)
+		return order.Order{}, false, fmt.Errorf("project order sequence %d: %w", sequence, err)
 	}
 
-	order := model.Order{
-		ID:               mix64(uint64(s.orderSeed) + sequence),  // Order ID 不是 Sequence
+	order := order.Order{
+		ID:               mix64(uint64(s.orderSeed) + sequence), // Order ID 不是 Sequence
 		Sequence:         sequence,
 		PlannedArrivalNs: plannedArrival(sequence, s.total, s.window, s.arrival).Nanoseconds(),
 		Pickup:           location,
@@ -220,7 +221,6 @@ func plannedArrival(sequence, total uint64, window time.Duration, arrival Arriva
 		return 0
 	}
 
-	
 }
 
 func uniformArrival(sequence, total uint64, window time.Duration) time.Duration {
@@ -229,23 +229,23 @@ func uniformArrival(sequence, total uint64, window time.Duration) time.Duration 
 }
 
 func burstArrival(sequence, total uint64, window time.Duration) time.Duration {
-	if total == 0{
+	if total == 0 {
 		return 0
 	}
-	
+
 	// 80%
-	burstOrderCount := uint64(math.Round(float64(total) * 0.8)) 
-	
+	burstOrderCount := uint64(math.Round(float64(total) * 0.8))
+
 	// 防止上下溢出
-	if burstOrderCount < 1{
+	if burstOrderCount < 1 {
 		burstOrderCount = 1
 	} else if burstOrderCount > total {
 		burstOrderCount = total
 	}
-	
+
 	normalOrderCount := total - burstOrderCount // 20%
 
-	burstWindow := window / 5  // 前20%时间
+	burstWindow := window / 5 // 前20%时间
 	normalWindow := window - burstWindow
 
 	if sequence < uint64(burstOrderCount) {
@@ -263,13 +263,13 @@ func burstArrival(sequence, total uint64, window time.Duration) time.Duration {
 
 // 在当前时间window里依据指定的订单总数全部平均分配的时间戳
 func slotOffset(index, count uint64, duration time.Duration) time.Duration {
-	if count <= 1{
+	if count <= 1 {
 		return 0
 	}
 
 	// ( 持续总时间 ÷ 总数 ) × index
 	remainder := uint64(duration) % count
-	offset := uint64(duration) / count * index + uint64(index * remainder / count)
+	offset := uint64(duration)/count*index + uint64(index*remainder/count)
 	return time.Duration(offset)
 }
 
@@ -291,7 +291,7 @@ func ValidateSpatialDistribution(distribution SpatialDistribution) error {
 	}
 }
 
-func samplePoint(random *rand.Rand, bounds geo.BoundingBox, distribution SpatialDistribution) model.GeoPoint {
+func samplePoint(random *rand.Rand, bounds geo.BoundingBox, distribution SpatialDistribution) geo.GeoPoint {
 	latitudeSpan := bounds.MaxLatitude - bounds.MinLatitude
 	longitudeSpan := bounds.MaxLongitude - bounds.MinLongitude
 
@@ -317,7 +317,7 @@ func samplePoint(random *rand.Rand, bounds geo.BoundingBox, distribution Spatial
 
 	latitudeRatio = clampUnit(latitudeRatio)
 	longitudeRatio = clampUnit(longitudeRatio)
-	return model.GeoPoint{
+	return geo.GeoPoint{
 		Latitude:  bounds.MinLatitude + latitudeRatio*latitudeSpan,
 		Longitude: bounds.MinLongitude + longitudeRatio*longitudeSpan,
 	}

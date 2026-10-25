@@ -3,9 +3,9 @@ package report
 import (
 	"math"
 	"reflect"
+	"ride-sharing/internal/domain/matching"
+	"ride-sharing/internal/domain/rider"
 	"testing"
-
-	"ride-sharing/internal/model"
 )
 
 func TestSummaryIncludesZeroRidersAndSortedBottom10(t *testing.T) {
@@ -41,7 +41,7 @@ func TestSummaryIncludesZeroRidersAndSortedBottom10(t *testing.T) {
 }
 
 func TestBottom10UsesUIDAsTieBreaker(t *testing.T) {
-	riders := []model.Rider{{UID: 30}, {UID: 10}, {UID: 20}}
+	riders := []rider.Rider{{UID: 30}, {UID: 10}, {UID: 20}}
 	accumulator := mustAccumulator(t, riders)
 
 	want := []RiderOrderCount{
@@ -107,7 +107,7 @@ func TestDistanceHistogramOverflowIsVisible(t *testing.T) {
 
 func TestObserveRejectsInvalidAssignment(t *testing.T) {
 	accumulator := mustAccumulator(t, makeRiders(1))
-	tests := []model.Assignment{
+	tests := []matching.Assignment{
 		{RiderUID: 999, DistanceSquaredMeters: 1},
 		{RiderUID: 1, DistanceSquaredMeters: -1},
 		{RiderUID: 1, DistanceSquaredMeters: math.NaN()},
@@ -127,7 +127,7 @@ func TestNewRejectsInvalidRiderSets(t *testing.T) {
 	if _, err := New(nil); err == nil {
 		t.Fatal("New(nil) error = nil")
 	}
-	if _, err := New([]model.Rider{{UID: 1}, {UID: 1}}); err == nil {
+	if _, err := New([]rider.Rider{{UID: 1}, {UID: 1}}); err == nil {
 		t.Fatal("New(duplicate UID) error = nil")
 	}
 }
@@ -157,22 +157,22 @@ func TestMergeCombinesWorkerOwnedStatistics(t *testing.T) {
 }
 
 func TestMergeRejectsDifferentRiderLayouts(t *testing.T) {
-	first := mustAccumulator(t, []model.Rider{{UID: 1}, {UID: 2}})
-	second := mustAccumulator(t, []model.Rider{{UID: 2}, {UID: 1}})
+	first := mustAccumulator(t, []rider.Rider{{UID: 1}, {UID: 2}})
+	second := mustAccumulator(t, []rider.Rider{{UID: 2}, {UID: 1}})
 	if err := first.Merge(second); err == nil {
 		t.Fatal("Merge() error = nil, want rider layout error")
 	}
 }
 
-func makeRiders(count int) []model.Rider {
-	riders := make([]model.Rider, count)
+func makeRiders(count int) []rider.Rider {
+	riders := make([]rider.Rider, count)
 	for index := range riders {
 		riders[index].UID = uint64(index + 1)
 	}
 	return riders
 }
 
-func mustAccumulator(t *testing.T, riders []model.Rider) *Accumulator {
+func mustAccumulator(t *testing.T, riders []rider.Rider) *Accumulator {
 	t.Helper()
 	accumulator, err := New(riders)
 	if err != nil {
@@ -183,7 +183,7 @@ func mustAccumulator(t *testing.T, riders []model.Rider) *Accumulator {
 
 func observe(t *testing.T, accumulator *Accumulator, riderUID uint64, distanceMeters float64) {
 	t.Helper()
-	err := accumulator.Observe(model.Assignment{
+	err := accumulator.Observe(matching.Assignment{
 		RiderUID:              riderUID,
 		DistanceSquaredMeters: distanceMeters * distanceMeters,
 	})

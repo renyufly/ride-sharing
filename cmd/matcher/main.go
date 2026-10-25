@@ -10,6 +10,10 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"ride-sharing/internal/domain/geo"
+	"ride-sharing/internal/domain/matching"
+	"ride-sharing/internal/domain/order"
+	"ride-sharing/internal/domain/rider"
 	"time"
 
 	"errors"
@@ -17,7 +21,6 @@ import (
 	"ride-sharing/internal/config"
 	"ride-sharing/internal/deferred"
 	matchrule "ride-sharing/internal/matcher"
-	"ride-sharing/internal/model"
 	"ride-sharing/internal/pipeline"
 	"ride-sharing/internal/report"
 	"ride-sharing/internal/resource"
@@ -38,35 +41,35 @@ type startupOutput struct {
 }
 
 type dataOutput struct {
-	Bounds               boundsOutput                     `json:"bounds"`
-	ProjectionOrigin     geoPointOutput                   `json:"projectionOrigin"`
-	EarthRadiusMeters    float64                          `json:"earthRadiusMeters"`
-	RiderSeed            int64                            `json:"riderSeed"`
-	OrderSeed            int64                            `json:"orderSeed"`
-	GeneratedRiderCount  int                              `json:"generatedRiderCount"`
-	GeneratedOrderCount  int                              `json:"generatedOrderCount"`
-	GeneratedWithinWindow int							  `json:"generatedWithinWindow"`
-	AdmittedOrderCount   int                              `json:"admittedOrderCount"`
-	AdmittedWithinWindow int 							  `json:"admittedWithinWindow"`
-	CompletedOrderCount  int                              `json:"completedOrderCount"`
-	CompletedWithinWindow int 							  `json:"completedWithinWindow"`
-	UnfinishedOrderCount int                              `json:"unfinishedOrderCount"`
-	LastPlannedArrivalNs int64                            `json:"lastPlannedArrivalNs"`
-	MaxQueueDepth        int                              `json:"maxQueueDepthBatches"`
-	WorkerCompleted      []uint64                         `json:"workerCompletedOrders"`
-	GOMAXPROCS           int                              `json:"gomaxprocs"`
-	MemoryEstimate       *pipeline.MemoryEstimate         `json:"memoryEstimate,omitempty"`
-	BalancedMemory       *pipeline.BalancedMemoryEstimate `json:"balancedMemoryEstimate,omitempty"`
-	Index                matchrule.IndexStats             `json:"index"`
-	Timing               timingOutput                     `json:"timing"`
-	Performance          pipeline.PerformanceMetrics      `json:"performance"`
-	Resources            resource.Stats                   `json:"resources"`
-	RiderPreview         []riderOutput                    `json:"riderPreview"`
-	OrderPreview         []orderOutput                    `json:"orderPreview"`
-	AssignmentPreview    []assignmentOutput               `json:"assignmentPreview"`
-	Report               report.Summary                   `json:"report"`
-	StrategyDetails      *pipeline.StrategyMetrics        `json:"strategyDetails,omitempty"`
-	ReadableSummary		 readableSummary				  `json:"readableSummary"`
+	Bounds                boundsOutput                     `json:"bounds"`
+	ProjectionOrigin      geoPointOutput                   `json:"projectionOrigin"`
+	EarthRadiusMeters     float64                          `json:"earthRadiusMeters"`
+	RiderSeed             int64                            `json:"riderSeed"`
+	OrderSeed             int64                            `json:"orderSeed"`
+	GeneratedRiderCount   int                              `json:"generatedRiderCount"`
+	GeneratedOrderCount   int                              `json:"generatedOrderCount"`
+	GeneratedWithinWindow int                              `json:"generatedWithinWindow"`
+	AdmittedOrderCount    int                              `json:"admittedOrderCount"`
+	AdmittedWithinWindow  int                              `json:"admittedWithinWindow"`
+	CompletedOrderCount   int                              `json:"completedOrderCount"`
+	CompletedWithinWindow int                              `json:"completedWithinWindow"`
+	UnfinishedOrderCount  int                              `json:"unfinishedOrderCount"`
+	LastPlannedArrivalNs  int64                            `json:"lastPlannedArrivalNs"`
+	MaxQueueDepth         int                              `json:"maxQueueDepthBatches"`
+	WorkerCompleted       []uint64                         `json:"workerCompletedOrders"`
+	GOMAXPROCS            int                              `json:"gomaxprocs"`
+	MemoryEstimate        *pipeline.MemoryEstimate         `json:"memoryEstimate,omitempty"`
+	BalancedMemory        *pipeline.BalancedMemoryEstimate `json:"balancedMemoryEstimate,omitempty"`
+	Index                 matchrule.IndexStats             `json:"index"`
+	Timing                timingOutput                     `json:"timing"`
+	Performance           pipeline.PerformanceMetrics      `json:"performance"`
+	Resources             resource.Stats                   `json:"resources"`
+	RiderPreview          []riderOutput                    `json:"riderPreview"`
+	OrderPreview          []orderOutput                    `json:"orderPreview"`
+	AssignmentPreview     []assignmentOutput               `json:"assignmentPreview"`
+	Report                report.Summary                   `json:"report"`
+	StrategyDetails       *pipeline.StrategyMetrics        `json:"strategyDetails,omitempty"`
+	ReadableSummary       readableSummary                  `json:"readableSummary"`
 }
 
 type boundsOutput struct {
@@ -108,9 +111,9 @@ type assignmentOutput struct {
 }
 
 // 面向接口编程
-// type nearestMatcher interface {  
-// 	Match(model.Order) (model.Assignment, error)
-// 	TopKInto(model.Order, int, []matchrule.Candidate) ([]matchrule.Candidate, error)
+// type nearestMatcher interface {
+// 	Match(order.Order) (matching.Assignment, error)
+// 	TopKInto(order.Order, int, []matching.Candidate) ([]matching.Candidate, error)
 // 	IndexStats() matchrule.IndexStats
 // }
 
@@ -123,14 +126,14 @@ type timingOutput struct {
 }
 
 type readableSummary struct {
-	Workload    string `json:"workload"`
-    Result      string `json:"result"`
-    Strategy    string	`json:"strategy"`
-    Timing      string	`json:"timing"`
-    Load        string	`json:"load"`
-    Distance    string	`json:"distance"`
-	Algorithm   string  `json:"algorithm"`
-	Resources   string  `json:"resources"`
+	Workload  string `json:"workload"`
+	Result    string `json:"result"`
+	Strategy  string `json:"strategy"`
+	Timing    string `json:"timing"`
+	Load      string `json:"load"`
+	Distance  string `json:"distance"`
+	Algorithm string `json:"algorithm"`
+	Resources string `json:"resources"`
 }
 
 func main() {
@@ -139,7 +142,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "invalid matcher configuration: %v\n", err)
 		os.Exit(2)
 	}
-	
 
 	var deferredOrderSink pipeline.DeferredOrderSink
 	var fileSink *deferred.FileSink
@@ -158,7 +160,6 @@ func main() {
 		deferredOrderSink = nil
 	}
 
-
 	// Context + Goroutine 生命周期管理：控制整个并发 Pipeline 生命周期
 	runContext, stopSignal := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stopSignal()
@@ -167,8 +168,8 @@ func main() {
 	previewSize := 3
 
 	request := matchrun.Request{
-		Config: cfg,
-		PreviewSize: previewSize,
+		Config:       cfg,
+		PreviewSize:  previewSize,
 		DeferredSink: deferredOrderSink,
 	}
 
@@ -195,11 +196,10 @@ func main() {
 	balancedMemory := runResult.BalancedMemory
 	resourceStats := runResult.Resources
 	riderGenerationDuration := runResult.Timing.RiderGeneration
-	indexBuildDuration	:= runResult.Timing.IndexBuild
+	indexBuildDuration := runResult.Timing.IndexBuild
 	pipelineDuration := runResult.Timing.Pipeline
-	totalDuration :=runResult.Timing.Total
-	throughput	:= runResult.Timing.ThroughputPerSecond
-	
+	totalDuration := runResult.Timing.Total
+	throughput := runResult.Timing.ThroughputPerSecond
 
 	phase := fmt.Sprintf("csp-%s-report", cfg.Algorithm)
 	message := "all orders matched exactly through the bounded CSP pipeline"
@@ -252,27 +252,27 @@ func main() {
 
 	if cfg.Strategy == config.StrategyBalanced {
 		strategyText = fmt.Sprintf(
-		"策略B-负载均衡骑手分配, 使用 %s 算法寻找候选骑手，Top-K=%d，最大额外距离=%.2fm",
-		cfg.Algorithm,
-		cfg.TopK,
-		cfg.MaxExtraDistanceMeters,
-	)
+			"策略B-负载均衡骑手分配, 使用 %s 算法寻找候选骑手，Top-K=%d，最大额外距离=%.2fm",
+			cfg.Algorithm,
+			cfg.TopK,
+			cfg.MaxExtraDistanceMeters,
+		)
 
 		algorithmText = fmt.Sprintf(
-		"策略B-负载均衡分配骑手, Top-K搜索骑手(使用KD-Tree) P50/P95/P99/Max=%s/%s/%s/%s, 最终决策选出最终骑手 P50/P95/P99/Max=%s/%s/%s/%s, 纯算法总耗时 P50/P95/P99/Max=%s/%s/%s/%s",
-		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.CandidateSearch.P50Ns).String(),
-		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.CandidateSearch.P95Ns).String(),
-		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.CandidateSearch.P99Ns).String(),
-		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.CandidateSearch.MaxNs).String(),
-		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AssignmentDecision.P50Ns).String(),
-		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AssignmentDecision.P95Ns).String(),
-		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AssignmentDecision.P99Ns).String(),
-		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AssignmentDecision.MaxNs).String(),
-		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AlgorithmCompute.P50Ns).String(),
-		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AlgorithmCompute.P95Ns).String(),
-		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AlgorithmCompute.P99Ns).String(),
-		time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AlgorithmCompute.MaxNs).String(),
-	)
+			"策略B-负载均衡分配骑手, Top-K搜索骑手(使用KD-Tree) P50/P95/P99/Max=%s/%s/%s/%s, 最终决策选出最终骑手 P50/P95/P99/Max=%s/%s/%s/%s, 纯算法总耗时 P50/P95/P99/Max=%s/%s/%s/%s",
+			time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.CandidateSearch.P50Ns).String(),
+			time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.CandidateSearch.P95Ns).String(),
+			time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.CandidateSearch.P99Ns).String(),
+			time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.CandidateSearch.MaxNs).String(),
+			time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AssignmentDecision.P50Ns).String(),
+			time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AssignmentDecision.P95Ns).String(),
+			time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AssignmentDecision.P99Ns).String(),
+			time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AssignmentDecision.MaxNs).String(),
+			time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AlgorithmCompute.P50Ns).String(),
+			time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AlgorithmCompute.P95Ns).String(),
+			time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AlgorithmCompute.P99Ns).String(),
+			time.Duration(pipelineResult.Performance.AlgorithmPerformanceMetrics.AlgorithmCompute.MaxNs).String(),
+		)
 	}
 
 	// Pipeline包含时间：
@@ -284,9 +284,9 @@ func main() {
 	// 报告统计。
 	// Worker 结束和结果归并
 	timingText := fmt.Sprintf(
-		"最后的一个订单的生成时间=%s，整个Pipeline时间=%s (非纯匹配算法耗时)，端到端P99=%s (99%%的订单，从计划生成开始，到完成匹配所花的时间不超过) \n" +
-		"最后一笔订单生成后系统还花了多久才完成全部订单=%s, 最后一个 Batch 在 Pipeline 启动后的什么时间成功写入匹配 Channel=%s \n" + 
-		"整个系统截止到最后一单完成总共时间=%s, 主程序全部总时间=%s", 
+		"最后的一个订单的生成时间=%s，整个Pipeline时间=%s (非纯匹配算法耗时)，端到端P99=%s (99%%的订单，从计划生成开始，到完成匹配所花的时间不超过) \n"+
+			"最后一笔订单生成后系统还花了多久才完成全部订单=%s, 最后一个 Batch 在 Pipeline 启动后的什么时间成功写入匹配 Channel=%s \n"+
+			"整个系统截止到最后一单完成总共时间=%s, 主程序全部总时间=%s",
 		lastPlannedArrivalText,
 		pipelineDurationText,
 		endToEndP99Text,
@@ -295,10 +295,10 @@ func main() {
 		time.Duration(pipelineResult.Performance.TotalRunNs).String(),
 		time.Duration(totalDuration.Nanoseconds()).String(),
 	)
-	
+
 	loadText := fmt.Sprintf(
-		"骑手额度=%d (0表示不限额), 主窗口内骑手被分配订单数量 min/mean/max=%d/%.2f/%d，零订单的骑手数量=%d，Coefficient Of Variation=%.4f" +
-		"因骑手满额度而被defer的订单数=%d, 超时未分配而被defer的订单数=%d",
+		"骑手额度=%d (0表示不限额), 主窗口内骑手被分配订单数量 min/mean/max=%d/%.2f/%d，零订单的骑手数量=%d，Coefficient Of Variation=%.4f"+
+			"因骑手满额度而被defer的订单数=%d, 超时未分配而被defer的订单数=%d",
 		pipelineResult.MaxOrdersPerRider,
 		pipelineResult.Report.MinOrders,
 		pipelineResult.Report.MeanOrders,
@@ -307,7 +307,6 @@ func main() {
 		pipelineResult.Report.CoefficientOfVariation,
 		pipelineResult.DeferredByCapacity,
 		pipelineResult.DeferredByWindow,
-
 	)
 
 	distanceText := fmt.Sprintf(
@@ -319,14 +318,14 @@ func main() {
 
 	// Resource
 	monitorTime := time.Duration(resourceStats.ElapsedNs)
-	gcPauseTime:= time.Duration(resourceStats.GCPauseDeltaNs)
+	gcPauseTime := time.Duration(resourceStats.GCPauseDeltaNs)
 
 	resourceText := fmt.Sprintf(
 		"资源监控时长=%s，采样=%d次（间隔%s）；"+
-		"Go堆峰值=%dKB，HeapInuse峰值=%dKB，"+
-		"Runtime Sys峰值=%dKB；"+
-		"累计分配=%dKB，GC=%d次，GC暂停=%s，"+
-		"Goroutine峰值=%d，GOMAXPROCS=%d",
+			"Go堆峰值=%dKB，HeapInuse峰值=%dKB，"+
+			"Runtime Sys峰值=%dKB；"+
+			"累计分配=%dKB，GC=%d次，GC暂停=%s，"+
+			"Goroutine峰值=%d，GOMAXPROCS=%d",
 		monitorTime, resourceStats.Samples, resourceStats.SampleInterval,
 		resourceStats.PeakHeapAllocBytes/1024,
 		resourceStats.PeakHeapInuseBytes/1024,
@@ -335,7 +334,6 @@ func main() {
 		resourceStats.NumGCDelta, gcPauseTime,
 		resourceStats.PeakGoroutines, runResult.GOMAXPROCS,
 	)
-
 
 	// 把之前计算出来的结果装进一个 JSON DTO
 	output := startupOutput{
@@ -349,25 +347,25 @@ func main() {
 				MinLongitude: bounds.MinLongitude,
 				MaxLongitude: bounds.MaxLongitude,
 			},
-			ProjectionOrigin:     displayGeoPoint(runResult.ProjectionOrigin),
-			EarthRadiusMeters:    runResult.EarthRadiusMeter,
-			RiderSeed:            seeds.Rider,
-			OrderSeed:            seeds.Order,
-			GeneratedRiderCount:  runResult.GeneratedRiderCount,
-			GeneratedOrderCount:  int(pipelineResult.GeneratedOrders),
+			ProjectionOrigin:      displayGeoPoint(runResult.ProjectionOrigin),
+			EarthRadiusMeters:     runResult.EarthRadiusMeter,
+			RiderSeed:             seeds.Rider,
+			OrderSeed:             seeds.Order,
+			GeneratedRiderCount:   runResult.GeneratedRiderCount,
+			GeneratedOrderCount:   int(pipelineResult.GeneratedOrders),
 			GeneratedWithinWindow: int(pipelineResult.GeneratedWithinWindow),
-			AdmittedOrderCount:   int(pipelineResult.AdmittedOrders),
-			AdmittedWithinWindow: int(pipelineResult.AdmittedWithinWindow),
-			CompletedOrderCount:  int(pipelineResult.CompletedOrders),
+			AdmittedOrderCount:    int(pipelineResult.AdmittedOrders),
+			AdmittedWithinWindow:  int(pipelineResult.AdmittedWithinWindow),
+			CompletedOrderCount:   int(pipelineResult.CompletedOrders),
 			CompletedWithinWindow: int(pipelineResult.CompletedWithinWindow),
-			UnfinishedOrderCount: int(pipelineResult.UnfinishedOrders),
-			LastPlannedArrivalNs: pipelineResult.LastPlannedArrivalNs,
-			MaxQueueDepth:        pipelineResult.MaxQueueDepth,
-			WorkerCompleted:      pipelineResult.WorkerCompleted,
-			GOMAXPROCS:           runResult.GOMAXPROCS,
-			MemoryEstimate:       memoryEstimate,
-			BalancedMemory:       balancedMemory,
-			Index:                runResult.Index,
+			UnfinishedOrderCount:  int(pipelineResult.UnfinishedOrders),
+			LastPlannedArrivalNs:  pipelineResult.LastPlannedArrivalNs,
+			MaxQueueDepth:         pipelineResult.MaxQueueDepth,
+			WorkerCompleted:       pipelineResult.WorkerCompleted,
+			GOMAXPROCS:            runResult.GOMAXPROCS,
+			MemoryEstimate:        memoryEstimate,
+			BalancedMemory:        balancedMemory,
+			Index:                 runResult.Index,
 			Timing: timingOutput{
 				RiderGenerationNs: riderGenerationDuration.Nanoseconds(),
 				IndexBuildNs:      indexBuildDuration.Nanoseconds(),
@@ -383,12 +381,12 @@ func main() {
 			Report:            pipelineResult.Report,
 			StrategyDetails:   pipelineResult.StrategyDetails,
 			ReadableSummary: readableSummary{
-				Workload: workloadText,
-				Result: resultText,
-				Strategy: strategyText,
-				Timing: timingText,
-				Load: loadText,
-				Distance: distanceText,
+				Workload:  workloadText,
+				Result:    resultText,
+				Strategy:  strategyText,
+				Timing:    timingText,
+				Load:      loadText,
+				Distance:  distanceText,
 				Algorithm: algorithmText,
 				Resources: resourceText,
 			},
@@ -406,7 +404,7 @@ func main() {
 
 // displayXXX：DTO 转换: 内部业务 Model -> 用于 JSON 展示的 Model
 // 内部数据结构和对外输出格式解耦
-func displayRiders(riders []model.Rider, limit int) []riderOutput {
+func displayRiders(riders []rider.Rider, limit int) []riderOutput {
 	if limit > len(riders) {
 		limit = len(riders)
 	}
@@ -421,7 +419,7 @@ func displayRiders(riders []model.Rider, limit int) []riderOutput {
 	return preview
 }
 
-func displayOrder(order model.Order) orderOutput {
+func displayOrder(order order.Order) orderOutput {
 	return orderOutput{
 		ID:               order.ID,
 		Sequence:         order.Sequence,
@@ -431,7 +429,7 @@ func displayOrder(order model.Order) orderOutput {
 	}
 }
 
-func displayOrders(orders []model.Order) []orderOutput {
+func displayOrders(orders []order.Order) []orderOutput {
 	result := make([]orderOutput, len(orders))
 	for index, order := range orders {
 		result[index] = displayOrder(order)
@@ -439,7 +437,7 @@ func displayOrders(orders []model.Order) []orderOutput {
 	return result
 }
 
-func displayAssignment(assignment model.Assignment) assignmentOutput {
+func displayAssignment(assignment matching.Assignment) assignmentOutput {
 	return assignmentOutput{
 		OrderID:               assignment.OrderID,
 		Sequence:              assignment.Sequence,
@@ -448,7 +446,7 @@ func displayAssignment(assignment model.Assignment) assignmentOutput {
 	}
 }
 
-func displayAssignments(assignments []model.Assignment) []assignmentOutput {
+func displayAssignments(assignments []matching.Assignment) []assignmentOutput {
 	result := make([]assignmentOutput, len(assignments))
 	for index, assignment := range assignments {
 		result[index] = displayAssignment(assignment)
@@ -456,10 +454,10 @@ func displayAssignments(assignments []model.Assignment) []assignmentOutput {
 	return result
 }
 
-func displayGeoPoint(point model.GeoPoint) geoPointOutput {
+func displayGeoPoint(point geo.GeoPoint) geoPointOutput {
 	return geoPointOutput{Latitude: point.Latitude, Longitude: point.Longitude}
 }
 
-func displayPoint(point model.Point2D) pointOutput {
+func displayPoint(point geo.Point2D) pointOutput {
 	return pointOutput{X: point.X, Y: point.Y}
 }
