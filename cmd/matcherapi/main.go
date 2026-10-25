@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"ride-sharing/internal/matcherapi"
+	runhttp "ride-sharing/internal/transport/http/run"
 	"ride-sharing/shared/env"
 	"syscall"
 	"time"
@@ -21,21 +21,17 @@ var (
 
 func main() {
 
-	handler := matcherapi.NewHandler()
+	handler := runhttp.NewHandler()
 
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("POST /matcher/run", handler.Run)
-	mux.HandleFunc("POST /matcher/retry", handler.Retry)
-
+	mux := newMux(handler)
 
 	server := &http.Server{
-		Addr: httpAddr,
-		Handler: mux,
-		ReadHeaderTimeout: 5*time.Second,
-		ReadTimeout: 10*time.Second,
-		WriteTimeout: 135*time.Second,
-		IdleTimeout: 60*time.Second,
+		Addr:              httpAddr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      135 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	serverErrors := make(chan error, 1)
@@ -52,7 +48,7 @@ func main() {
 
 	select {
 	case err := <-serverErrors:
-		if err != nil && errors.Is(err, http.ErrServerClosed) == false{
+		if err != nil && errors.Is(err, http.ErrServerClosed) == false {
 			log.Printf("matcher API server failed: %v", err)
 		}
 	case sig := <-shutdown:
@@ -70,4 +66,11 @@ func main() {
 		}
 	}
 
+}
+
+func newMux(handler *runhttp.Handler) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /matcher/run", handler.Run)
+	mux.HandleFunc("POST /matcher/retry", handler.Retry)
+	return mux
 }

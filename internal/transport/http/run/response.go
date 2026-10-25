@@ -1,4 +1,4 @@
-package matcherapi
+package run
 
 import (
 	appmatching "ride-sharing/internal/app/matching"
@@ -11,7 +11,7 @@ import (
 
 // 成功响应-json
 type RunResponse struct {
-	// Result	run.Result	`json:"result"`	 // Runner 的完整统计结果
+	// Result	apprun.Result	`json:"result"`	 // Runner 的完整统计结果
 	// OrderPreview	[]order.Order	`json:"orderPreview"`	// 地图上的订单抽样点
 	// AssignmentPreview	[]matching.Assignment	`json:"assignmentPreview"`	// 地图匹配连线
 	// Deferred	memory.MemorySnapshot    `json:"deferred"`  // 内存 sink 的累计数和抽样订单

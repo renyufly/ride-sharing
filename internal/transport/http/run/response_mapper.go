@@ -1,10 +1,10 @@
-package matcherapi
+package run
 
 import (
 	"math"
 	"ride-sharing/internal/adapter/deferred/memory"
 	appmatching "ride-sharing/internal/app/matching"
-	"ride-sharing/internal/app/run"
+	apprun "ride-sharing/internal/app/run"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
@@ -12,7 +12,7 @@ import (
 	"ride-sharing/internal/platform/config"
 )
 
-func toRunResponse(result run.Result, snapshot memory.MemorySnapshot, previewSize int, runid string, currentRound int, rounds []RoundResponse) RunResponse {
+func toRunResponse(result apprun.Result, snapshot memory.MemorySnapshot, previewSize int, runid string, currentRound int, rounds []RoundResponse) RunResponse {
 	return RunResponse{
 		Config:      mapRunConfig(result.Config, previewSize),
 		Counts:      mapRunCounts(result.Pipeline),
@@ -76,7 +76,7 @@ func mapRunCounts(result appmatching.Result) RunCountsResponse {
 
 }
 
-func mapRunTiming(timing run.Timing) RunTimingResponse {
+func mapRunTiming(timing apprun.Timing) RunTimingResponse {
 	return RunTimingResponse{
 		RiderGenerationNs:   timing.RiderGeneration.Nanoseconds(),
 		IndexBuildNs:        timing.IndexBuild.Nanoseconds(),
@@ -151,7 +151,7 @@ func mapAssignments(assigns []matching.Assignment) []AssignmentPreviewResponse {
 	return assignsResponse
 }
 
-func mapRunMap(result run.Result) RunMapResponse {
+func mapRunMap(result apprun.Result) RunMapResponse {
 	return RunMapResponse{
 		Bounds:      mapBounds(result.Bounds),
 		Riders:      mapRiders(result.RiderPreview),
@@ -195,7 +195,7 @@ func mapDeferred(snapShot memory.MemorySnapshot, previewSize int) DeferredRespon
 }
 
 func mapRoundResponse(
-	result run.Result,
+	result apprun.Result,
 	snapshot memory.MemorySnapshot,
 	previewSize int,
 	round int,

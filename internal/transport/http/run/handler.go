@@ -1,4 +1,4 @@
-package matcherapi
+package run
 
 import (
 	"encoding/json"
@@ -8,7 +8,7 @@ import (
 	"ride-sharing/internal/adapter/deferred/memory"
 	sessionmemory "ride-sharing/internal/adapter/session/memory"
 	"ride-sharing/internal/adapter/simulation/runsetup"
-	"ride-sharing/internal/app/run"
+	apprun "ride-sharing/internal/app/run"
 	"ride-sharing/internal/app/run/replay"
 	"ride-sharing/internal/platform/config"
 )
@@ -102,7 +102,7 @@ func (h *Handler) Run(w http.ResponseWriter, r *http.Request) {
 		runRequest.DeferredSink = memorySink
 	}
 
-	runResult, runErr := run.Run(r.Context(), runRequest, runsetup.Factory{})
+	runResult, runErr := apprun.Run(r.Context(), runRequest, runsetup.Factory{})
 	if runErr != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
 			Error: "matcher run failed",
@@ -233,7 +233,7 @@ func (h *Handler) Retry(w http.ResponseWriter, r *http.Request) {
 
 	// 运行下一轮。
 
-	result, err := run.Run(r.Context(), retryRequest, runsetup.Factory{})
+	result, err := apprun.Run(r.Context(), retryRequest, runsetup.Factory{})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
 			Error: "matcher retry failed",

@@ -1,10 +1,10 @@
-package matcherapi
+package run
 
 import (
 	"fmt"
 	"ride-sharing/internal/adapter/simulation"
 	"ride-sharing/internal/adapter/simulation/orders"
-	"ride-sharing/internal/app/run"
+	apprun "ride-sharing/internal/app/run"
 	"ride-sharing/internal/platform/config"
 	"time"
 )
@@ -42,22 +42,22 @@ type RetryRequest struct {
 	GracePeriodMs     int64  `json:"gracePeriodMs"`
 }
 
-func (r Request) toRunRequest() (run.Request, error) {
+func (r Request) toRunRequest() (apprun.Request, error) {
 	if r.PreviewSize < 0 {
-		return run.Request{}, fmt.Errorf("preview must >= 0")
+		return apprun.Request{}, fmt.Errorf("preview must >= 0")
 	}
 
 	if r.PreviewSize > maxPreviewSize {
-		return run.Request{}, fmt.Errorf("exceed the max preview size: %d", maxPreviewSize)
+		return apprun.Request{}, fmt.Errorf("exceed the max preview size: %d", maxPreviewSize)
 	}
 
 	if r.MaxOrdersPerRider < 0 {
-		return run.Request{}, fmt.Errorf("maxOrdersPerRider cannot be negative")
+		return apprun.Request{}, fmt.Errorf("maxOrdersPerRider cannot be negative")
 	}
 
 	arrivalWindow, err := time.ParseDuration(r.ArrivalWindow)
 	if err != nil {
-		return run.Request{}, fmt.Errorf("parse arrivalWindow: %w", err)
+		return apprun.Request{}, fmt.Errorf("parse arrivalWindow: %w", err)
 	}
 
 	cfg := config.Default()
@@ -82,10 +82,10 @@ func (r Request) toRunRequest() (run.Request, error) {
 	cfg.RiderDistribution = simulation.SpatialDistribution(r.RiderDistribution)
 
 	if err := cfg.Validate(); err != nil {
-		return run.Request{}, fmt.Errorf("validate matcher request: %w", err)
+		return apprun.Request{}, fmt.Errorf("validate matcher request: %w", err)
 	}
 
-	return run.Request{
+	return apprun.Request{
 		Config:      cfg,
 		PreviewSize: r.PreviewSize,
 	}, nil

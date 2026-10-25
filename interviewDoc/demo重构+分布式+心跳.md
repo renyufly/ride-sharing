@@ -290,6 +290,10 @@ infra/                          沿用现有 Docker、Kubernetes 目录
 
 再让 `cmd/matcher/main.go` 使用迁移后的运行能力，保留 CLI 参数和现有 JSON 输出。两个入口若确有重复装配，可在都接通后提取少量共享装配；`cmd` 仍负责启动和依赖连接，不承载匹配规则。
 
+**步骤六执行结果（2026-10-25）：**原 `internal/matcherapi` 的请求/响应 DTO、输入校验、字段映射、Handler 与测试已迁入 `internal/transport/http/run`，不保留旧包转发。`cmd/matcherapi` 现装配新 Handler，仍注册 `POST /matcher/run` 和 `POST /matcher/retry`，保持同步返回；路由注册提取为同入口内的 `newMux` 以验证真实路由。CLI 已在步骤四接入同一 `app/run` 能力，本步骤保留原参数和 JSON 输出，不额外抽取仅为转发的共享包。
+
+**步骤六验证：**`go build ./...`、新 HTTP 包及路由测试通过；路由测试覆盖 Run/Retry 成功响应中的 `runId`、轮次等 JSON 字段，以及请求错误 400、RunID 不存在 404、轮次冲突 409、方法不允许 405 和未知路径 404。全仓测试继续排除步骤三已记录的 `TestArrivalModels` 断言进行验证，其到达算法未在本步骤修改。
+
 ### 步骤 7：收尾
 
 逐层切换引用：目标包接管责任后，再移除相应旧包。检查是否存在重复的订单、骑手、候选或结果类型、仅用于转发的旧包、循环依赖，以及应用层对具体适配器的反向依赖。最终只留下本轮有实现的 `domain`、`app`、`adapter`、`platform`、`transport/http` 子目录；后续架构目录等对应功能开始时再建立。
