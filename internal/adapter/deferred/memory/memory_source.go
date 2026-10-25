@@ -1,23 +1,23 @@
-package deferred
+package memory
 
 import (
 	"errors"
 	"fmt"
+	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/domain/order"
-	"ride-sharing/internal/pipeline"
 )
 
 type MemorySource struct {
-	orders []pipeline.DeferredOrder
+	orders []appmatching.DeferredOrder
 	next   int
 }
 
-func NewMemorySource(orders []pipeline.DeferredOrder) (*MemorySource, error) {
+func NewMemorySource(orders []appmatching.DeferredOrder) (*MemorySource, error) {
 	if len(orders) == 0 {
 		return nil, fmt.Errorf("empty")
 	}
 
-	copiedOrders := make([]pipeline.DeferredOrder, len(orders))
+	copiedOrders := make([]appmatching.DeferredOrder, len(orders))
 
 	// （浅拷贝切片元素，切断底层数组引用）
 	copy(copiedOrders, orders)

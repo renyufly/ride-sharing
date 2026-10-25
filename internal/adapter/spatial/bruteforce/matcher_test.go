@@ -2,13 +2,15 @@ package bruteforce
 
 import (
 	"math"
+	"ride-sharing/internal/adapter/simulation/orders"
+	"ride-sharing/internal/adapter/simulation/riders"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
 	"testing"
 	"time"
 
+	"ride-sharing/internal/adapter/simulation"
 	"ride-sharing/internal/domain/geo"
-	"ride-sharing/internal/generator"
 )
 
 func TestMatchReturnsGlobalNearestRider(t *testing.T) {
@@ -133,16 +135,16 @@ func TestRequiredCorrectnessScales(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			dataGenerator, err := generator.New(42, geo.SanFranciscoBounds)
+			dataGenerator, err := simulation.New(42, geo.SanFranciscoBounds)
 			if err != nil {
-				t.Fatalf("generator.New() error = %v", err)
+				t.Fatalf("simulation.New() error = %v", err)
 			}
-			riders, err := dataGenerator.GenerateRiders(test.riderCount, generator.DistributionUniform)
+			riders, err := riders.Generate(dataGenerator, test.riderCount, simulation.DistributionUniform)
 			if err != nil {
 				t.Fatalf("GenerateRiders() error = %v", err)
 			}
 			matcher := mustMatcher(t, riders)
-			stream, err := dataGenerator.NewOrderStream(test.orderCount, 30*time.Second, generator.ArrivalUniformWindow, generator.DistributionUniform)
+			stream, err := orders.NewStream(dataGenerator, test.orderCount, 30*time.Second, orders.ArrivalUniformWindow, simulation.DistributionUniform)
 			if err != nil {
 				t.Fatalf("NewOrderStream() error = %v", err)
 			}

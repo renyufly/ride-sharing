@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
@@ -18,8 +19,8 @@ import (
 
 	"errors"
 
+	"ride-sharing/internal/adapter/deferred/file"
 	"ride-sharing/internal/config"
-	"ride-sharing/internal/deferred"
 	matchrule "ride-sharing/internal/matcher"
 	"ride-sharing/internal/pipeline"
 	"ride-sharing/internal/report"
@@ -143,12 +144,12 @@ func main() {
 		os.Exit(2)
 	}
 
-	var deferredOrderSink pipeline.DeferredOrderSink
-	var fileSink *deferred.FileSink
+	var deferredOrderSink appmatching.DeferredOrderSink
+	var fileSink *file.FileSink
 
 	switch cfg.Strategy {
 	case config.StrategyBalanced:
-		fileSink, err = deferred.NewFileSink(cfg.DeferredOutput)
+		fileSink, err = file.NewFileSink(cfg.DeferredOutput)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "create deferred output sink: %v\n", err)
 			os.Exit(1)

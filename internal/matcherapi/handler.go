@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"ride-sharing/internal/adapter/deferred/memory"
+	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/config"
-	"ride-sharing/internal/deferred"
 	"ride-sharing/internal/matchrun"
-	"ride-sharing/internal/pipeline"
 	"time"
 )
 
@@ -17,24 +17,21 @@ import (
 // 处理 HTTP 请求，然后把任务交给真正的业务层
 
 type Handler struct {
-	runSlot chan struct{}
+	runSlot     chan struct{}
 	nextRunID   uint64
 	lastSession *retrySession
 }
-
 
 type retrySession struct {
 	runID          string
 	currentRound   int
 	config         config.Config
 	previewSize    int
-	deferredOrders []pipeline.DeferredOrder
+	deferredOrders []appmatching.DeferredOrder
 	rounds         []RoundResponse
 }
 
-
-
-func NewHandler() *Handler{
+func NewHandler() *Handler {
 	handler := Handler{
 		runSlot: make(chan struct{}, 1),
 	}
@@ -53,7 +50,6 @@ func writeJSON(w http.ResponseWriter, status int, value any) error {
 	return json.NewEncoder(w).Encode(value)
 }
 
-
 func (h *Handler) Run(w http.ResponseWriter, r *http.Request) {
 
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
@@ -62,22 +58,22 @@ func (h *Handler) Run(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 
 	var apiRequest Request
-	if err:= decoder.Decode(&apiRequest); err != nil {
+	if err := decoder.Decode(&apiRequest); err != nil {
 		// 解码失败时返回 400 Bad Request
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{
 			Error: err.Error(),
 		})
-		return 
+		return
 	}
 
 	// 再执行一次解码，确认后面已经是 io.EOF
 	var extra struct{}
-	if err:= decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		if err == nil {
 			writeJSON(w, http.StatusBadRequest, ErrorResponse{
 				Error: "request body must only contain a single JSON object",
 			})
-	
+
 		} else {
 			writeJSON(w, http.StatusBadRequest, ErrorResponse{
 				Error: err.Error(),
@@ -89,51 +85,51 @@ func (h *Handler) Run(w http.ResponseWriter, r *http.Request) {
 	runRequest, err := apiRequest.toRunRequest()
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{
-				Error: err.Error(),
-			})
-	
-		return 
+			Error: err.Error(),
+		})
+
+		return
 	}
 
 	select {
 	case h.runSlot <- struct{}{}:
-		defer func() {<- h.runSlot }()
+		defer func() { <-h.runSlot }()
 	default:
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Error: "a match run is already in progress",
 		})
-		return 
+		return
 	}
 
-	var memorySink *deferred.MemorySink
+	var memorySink *memory.MemorySink
 	if runRequest.Config.Strategy == config.StrategyBalanced {
 
 		limit := runRequest.Config.OrderCount
 
-	memorySink, err = deferred.NewMemorySink(limit)
-		
-		// memorySink, err = deferred.NewMemorySink(runRequest.PreviewSize)
+		memorySink, err = memory.NewMemorySink(limit)
+
+		// memorySink, err = memory.NewMemorySink(runRequest.PreviewSize)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, ErrorResponse{
 				Error: "cannot create memory sink",
 			})
-		
-			return 
+
+			return
 		}
-		
+
 		runRequest.DeferredSink = memorySink
 	}
 
 	runResult, runErr := matchrun.Run(r.Context(), runRequest)
 	if runErr != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
-				Error: "matcher run failed",
+			Error: "matcher run failed",
 		})
-		
+
 		return
 	}
 
-	var memorySnapshot deferred.MemorySnapshot
+	var memorySnapshot memory.MemorySnapshot
 	if memorySink != nil {
 		memorySnapshot = memorySink.Snapshot()
 	}
@@ -159,7 +155,7 @@ func (h *Handler) Run(w http.ResponseWriter, r *http.Request) {
 		config:       runResult.Config,
 		previewSize:  runRequest.PreviewSize,
 		deferredOrders: append(
-			[]pipeline.DeferredOrder(nil),
+			[]appmatching.DeferredOrder(nil),
 			memorySnapshot.Orders...,
 		),
 		rounds: rounds,
@@ -173,10 +169,8 @@ func (h *Handler) Run(w http.ResponseWriter, r *http.Request) {
 	// }
 	runResponse := toRunResponse(runResult, memorySnapshot, runRequest.PreviewSize, runID, 1, rounds)
 
-
 	writeJSON(w, http.StatusOK, runResponse)
 
-	
 }
 
 func (h *Handler) Retry(w http.ResponseWriter, r *http.Request) {
@@ -186,22 +180,22 @@ func (h *Handler) Retry(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 
 	var apiRequest RetryRequest
-	if err:= decoder.Decode(&apiRequest); err != nil {
+	if err := decoder.Decode(&apiRequest); err != nil {
 		// 解码失败时返回 400 Bad Request
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{
 			Error: err.Error(),
 		})
-		return 
+		return
 	}
 
 	// 再执行一次解码，确认后面已经是 io.EOF
 	var extra struct{}
-	if err:= decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
 		if err == nil {
 			writeJSON(w, http.StatusBadRequest, ErrorResponse{
 				Error: "request body must only contain a single JSON object",
 			})
-	
+
 		} else {
 			writeJSON(w, http.StatusBadRequest, ErrorResponse{
 				Error: err.Error(),
@@ -261,7 +255,6 @@ func (h *Handler) Retry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-
 	// 准备下一轮。
 	nextRound := session.currentRound + 1
 	inputCount := len(session.deferredOrders)
@@ -278,8 +271,7 @@ func (h *Handler) Retry(w http.ResponseWriter, r *http.Request) {
 			time.Duration(apiRequest.GracePeriodMs) * time.Millisecond
 	}
 
-
-	memorySink, err := deferred.NewMemorySink(inputCount)
+	memorySink, err := memory.NewMemorySink(inputCount)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
 			Error: "cannot create retry memory sink",
@@ -287,79 +279,73 @@ func (h *Handler) Retry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	memorySource, err := deferred.NewMemorySource(session.deferredOrders)
-
+	memorySource, err := memory.NewMemorySource(session.deferredOrders)
 
 	retryRequest := matchrun.Request{
-	    Config:       retryConfig,
-	    PreviewSize:  session.previewSize,
-	    DeferredSink: memorySink,
-	    OrderSource:  memorySource,
+		Config:       retryConfig,
+		PreviewSize:  session.previewSize,
+		DeferredSink: memorySink,
+		OrderSource:  memorySource,
 	}
-
 
 	// 运行下一轮。
-	
+
 	result, err := matchrun.Run(r.Context(), retryRequest)
 	if err != nil {
-	    writeJSON(w, http.StatusInternalServerError, ErrorResponse{
-	        Error: "matcher retry failed",
-	    })
-	    return
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
+			Error: "matcher retry failed",
+		})
+		return
 	}
 
-	
 	snapshot := memorySink.Snapshot()
 
 	// 映射第二轮结果
-	
+
 	roundResponse := mapRoundResponse(
-	    result,
-	    snapshot,
-	    session.previewSize,
-	    nextRound,
-	    "deferred",
-	    apiRequest.SourceRound,
-	    retryConfig.ArrivalWindow.Milliseconds(),
+		result,
+		snapshot,
+		session.previewSize,
+		nextRound,
+		"deferred",
+		apiRequest.SourceRound,
+		retryConfig.ArrivalWindow.Milliseconds(),
 	)
 
 	// 创建新的轮次历史
 	newRounds := make(
-	    []RoundResponse,
-	    0,
-	    len(session.rounds)+1,
+		[]RoundResponse,
+		0,
+		len(session.rounds)+1,
 	)
-	
+
 	newRounds = append(newRounds, session.rounds...)
 	newRounds = append(newRounds, roundResponse)
 
 	// 准备新的 Session
 	newSession := &retrySession{
-	    runID:        session.runID,
-	    currentRound: nextRound,
-	    config:       retryConfig,
-	    previewSize:  session.previewSize,
-	    deferredOrders: append(
-	        []pipeline.DeferredOrder(nil),
-	        snapshot.Orders...,
-	    ),
-	    rounds: newRounds,
+		runID:        session.runID,
+		currentRound: nextRound,
+		config:       retryConfig,
+		previewSize:  session.previewSize,
+		deferredOrders: append(
+			[]appmatching.DeferredOrder(nil),
+			snapshot.Orders...,
+		),
+		rounds: newRounds,
 	}
 
-	
 	response := toRunResponse(
-	    result,
-	    snapshot,
-	    session.previewSize,
-	    session.runID,
-	    nextRound,
-	    newRounds,
+		result,
+		snapshot,
+		session.previewSize,
+		session.runID,
+		nextRound,
+		newRounds,
 	)
 
-	
 	h.lastSession = newSession
-	
-	writeJSON(w, http.StatusOK, response)
 
+	writeJSON(w, http.StatusOK, response)
 
 }

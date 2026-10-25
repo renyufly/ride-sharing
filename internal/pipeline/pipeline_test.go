@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"ride-sharing/internal/adapter/simulation/orders"
+	"ride-sharing/internal/adapter/simulation/riders"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
@@ -12,9 +14,9 @@ import (
 	"testing"
 	"time"
 
+	"ride-sharing/internal/adapter/simulation"
 	"ride-sharing/internal/adapter/spatial/kdtree"
 	"ride-sharing/internal/domain/geo"
-	"ride-sharing/internal/generator"
 	"ride-sharing/internal/report"
 )
 
@@ -22,7 +24,7 @@ func TestConcurrentPipelineMatchesSerialKDTree(t *testing.T) {
 	const orderCount = 10_000
 	dataGenerator, riders, matcher := testData(t, 100)
 	wrapper := &trackingMatcher{matcher: matcher, seen: make([]uint8, orderCount)}
-	stream, err := dataGenerator.NewOrderStream(orderCount, 0, generator.ArrivalUnbounded, generator.DistributionUniform)
+	stream, err := orders.NewStream(dataGenerator, orderCount, 0, orders.ArrivalUnbounded, simulation.DistributionUniform)
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}
@@ -58,7 +60,7 @@ func TestConcurrentPipelineMatchesSerialKDTree(t *testing.T) {
 func TestBoundedQueueAppliesBackpressureWithoutDropping(t *testing.T) {
 	const orderCount = 40
 	dataGenerator, riders, matcher := testData(t, 10)
-	stream, err := dataGenerator.NewOrderStream(orderCount, 0, generator.ArrivalUnbounded, generator.DistributionUniform)
+	stream, err := orders.NewStream(dataGenerator, orderCount, 0, orders.ArrivalUnbounded, simulation.DistributionUniform)
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}
@@ -81,7 +83,7 @@ func TestBoundedQueueAppliesBackpressureWithoutDropping(t *testing.T) {
 func TestCancellationReturnsPartialCountsAndStops(t *testing.T) {
 	const orderCount = 1_000
 	dataGenerator, riders, matcher := testData(t, 10)
-	stream, err := dataGenerator.NewOrderStream(orderCount, 0, generator.ArrivalUnbounded, generator.DistributionUniform)
+	stream, err := orders.NewStream(dataGenerator, orderCount, 0, orders.ArrivalUnbounded, simulation.DistributionUniform)
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}
@@ -322,13 +324,13 @@ func (s *failingSource) Next() (order.Order, bool, error) {
 	return order, true, nil
 }
 
-func testData(t *testing.T, riderCount int) (generator.Generator, []rider.Rider, kdtree.Matcher) {
+func testData(t *testing.T, riderCount int) (simulation.Scenario, []rider.Rider, kdtree.Matcher) {
 	t.Helper()
-	dataGenerator, err := generator.New(42, geo.SanFranciscoBounds)
+	dataGenerator, err := simulation.New(42, geo.SanFranciscoBounds)
 	if err != nil {
-		t.Fatalf("generator.New() error = %v", err)
+		t.Fatalf("simulation.New() error = %v", err)
 	}
-	riders, err := dataGenerator.GenerateRiders(riderCount, generator.DistributionUniform)
+	riders, err := riders.Generate(dataGenerator, riderCount, simulation.DistributionUniform)
 	if err != nil {
 		t.Fatalf("GenerateRiders() error = %v", err)
 	}
@@ -339,9 +341,9 @@ func testData(t *testing.T, riderCount int) (generator.Generator, []rider.Rider,
 	return dataGenerator, riders, matcher
 }
 
-func serialSummary(t *testing.T, dataGenerator generator.Generator, matcher Matcher, riders []rider.Rider, orderCount int) report.Summary {
+func serialSummary(t *testing.T, dataGenerator simulation.Scenario, matcher Matcher, riders []rider.Rider, orderCount int) report.Summary {
 	t.Helper()
-	stream, err := dataGenerator.NewOrderStream(orderCount, 0, generator.ArrivalUnbounded, generator.DistributionUniform)
+	stream, err := orders.NewStream(dataGenerator, orderCount, 0, orders.ArrivalUnbounded, simulation.DistributionUniform)
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}

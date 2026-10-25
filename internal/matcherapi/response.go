@@ -15,7 +15,7 @@ type RunResponse struct {
 	// Result	matchrun.Result	`json:"result"`	 // Runner 的完整统计结果
 	// OrderPreview	[]order.Order	`json:"orderPreview"`	// 地图上的订单抽样点
 	// AssignmentPreview	[]matching.Assignment	`json:"assignmentPreview"`	// 地图匹配连线
-	// Deferred	deferred.MemorySnapshot    `json:"deferred"`  // 内存 sink 的累计数和抽样订单
+	// Deferred	memory.MemorySnapshot    `json:"deferred"`  // 内存 sink 的累计数和抽样订单
 	Config      RunConfigResponse           `json:"config"`
 	Counts      RunCountsResponse           `json:"counts"`
 	Timing      RunTimingResponse           `json:"timing"`

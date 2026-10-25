@@ -255,6 +255,10 @@ infra/                          沿用现有 Docker、Kubernetes 目录
 - `internal/deferred` 的 JSONL 读写迁到 `internal/adapter/deferred/file`，内存读写迁到 `internal/adapter/deferred/memory`。保留记录格式、轮次检查和资源关闭责任。
 - `OrderSource`、`DeferredOrderSink` 等接口由使用它们的应用层持有；具体适配器实现这些接口。不要让应用流程直接依赖文件路径或内存容器类型。
 
+**步骤三执行结果（2026-10-25）：**`internal/adapter/simulation` 保留边界、投影、独立 seed 和共享空间采样；`orders` 提供到达模型与流式订单源，`riders` 提供骑手生成。原有 `generator` 已移除，调用方改用同一场景对象装配两个生成器。Deferred 的 JSONL source/sink、记录格式迁到 `internal/adapter/deferred/file`，内存 source/sink 迁到 `internal/adapter/deferred/memory`，原有 `deferred` 包已移除。`OrderSource`、`DeferredOrderSink`、`DeferredOrder` 与原因类型由 `internal/app/matching` 持有；现有流水线和运行入口暂时引用此契约，待步骤四迁移流程实现。文件 source 仍由运行编排关闭，文件 sink 仍由 CLI 关闭；内存 sink 保留快照复制和限额行为。
+
+**验证：**`go build ./...`、空间搜索测试及新增的 JSONL 往返/内存快照测试通过。迁移后的生成器测试保留原有 `TestArrivalModels` 断言，仍因第 5 笔 burst 计划时间为 1.6 秒而非预期的 2 秒失败；原实现与测试已有此不一致。`pipeline` 原有测试调用 `RunBalanced` 时缺少 sink 参数，仍无法编译；这两处行为或测试修正不属于步骤三。
+
 ### 步骤 4：拆分 `pipeline` 和 `matchrun`
 
 `internal/pipeline` 混合了有界队列、并行计算、按序决策、策略选择、Deferred 和性能统计，不应整包改名。按现有行为拆为：

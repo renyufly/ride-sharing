@@ -1,8 +1,12 @@
-package generator
+package simulation_test
 
 import (
 	"reflect"
+	"ride-sharing/internal/adapter/simulation"
+	"ride-sharing/internal/adapter/simulation/orders"
+	"ride-sharing/internal/adapter/simulation/riders"
 	"ride-sharing/internal/domain/order"
+	"ride-sharing/internal/domain/rider"
 	"testing"
 	"time"
 
@@ -128,31 +132,31 @@ func TestOrderStreamDoesNotRetainAllOrders(t *testing.T) {
 	}
 }
 
-func mustGenerator(t *testing.T, seed int64) Generator {
+func mustGenerator(t *testing.T, seed int64) testGenerator {
 	t.Helper()
-	generator, err := New(seed, geo.SanFranciscoBounds)
+	generator, err := simulation.New(seed, geo.SanFranciscoBounds)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
-	return generator
+	return testGenerator{generator}
 }
 
-func readOrders(t *testing.T, generator Generator, count int, arrival ArrivalModel, distribution SpatialDistribution) []order.Order {
+func readOrders(t *testing.T, generator testGenerator, count int, arrival ArrivalModel, distribution SpatialDistribution) []order.Order {
 	t.Helper()
 	return readOrdersInWindowWithDistribution(t, generator, count, 30*time.Second, arrival, distribution)
 }
 
-func readOrdersWithDistribution(t *testing.T, generator Generator, count int, arrival ArrivalModel, distribution SpatialDistribution) []order.Order {
+func readOrdersWithDistribution(t *testing.T, generator testGenerator, count int, arrival ArrivalModel, distribution SpatialDistribution) []order.Order {
 	t.Helper()
 	return readOrdersInWindowWithDistribution(t, generator, count, 30*time.Second, arrival, distribution)
 }
 
-func readOrdersInWindow(t *testing.T, generator Generator, count int, window time.Duration, arrival ArrivalModel) []order.Order {
+func readOrdersInWindow(t *testing.T, generator testGenerator, count int, window time.Duration, arrival ArrivalModel) []order.Order {
 	t.Helper()
 	return readOrdersInWindowWithDistribution(t, generator, count, window, arrival, DistributionUniform)
 }
 
-func readOrdersInWindowWithDistribution(t *testing.T, generator Generator, count int, window time.Duration, arrival ArrivalModel, distribution SpatialDistribution) []order.Order {
+func readOrdersInWindowWithDistribution(t *testing.T, generator testGenerator, count int, window time.Duration, arrival ArrivalModel, distribution SpatialDistribution) []order.Order {
 	t.Helper()
 	stream, err := generator.NewOrderStream(count, window, arrival, distribution)
 	if err != nil {
@@ -194,3 +198,29 @@ func assertNonDecreasing(t *testing.T, orders []order.Order) {
 		}
 	}
 }
+
+// testGenerator keeps the original cross-stream assertions focused on behavior.
+type testGenerator struct{ simulation.Scenario }
+
+func (g testGenerator) GenerateRiders(count int, distribution SpatialDistribution) ([]rider.Rider, error) {
+	return riders.Generate(g.Scenario, count, distribution)
+}
+
+func (g testGenerator) NewOrderStream(count int, window time.Duration, arrival ArrivalModel, distribution SpatialDistribution) (*orders.OrderStream, error) {
+	return orders.NewStream(g.Scenario, count, window, arrival, distribution)
+}
+
+type ArrivalModel = orders.ArrivalModel
+type SpatialDistribution = simulation.SpatialDistribution
+
+const (
+	DistributionUniform = simulation.DistributionUniform
+	DistributionHotspot = simulation.DistributionHotspot
+	DistributionSkewed  = simulation.DistributionSkewed
+)
+
+const (
+	ArrivalUniformWindow    = orders.ArrivalUniformWindow
+	ArrivalFrontLoadedBurst = orders.ArrivalFrontLoadedBurst
+	ArrivalUnbounded        = orders.ArrivalUnbounded
+)

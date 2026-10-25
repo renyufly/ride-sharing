@@ -2,8 +2,9 @@ package matcherapi
 
 import (
 	"fmt"
+	"ride-sharing/internal/adapter/simulation"
+	"ride-sharing/internal/adapter/simulation/orders"
 	"ride-sharing/internal/config"
-	"ride-sharing/internal/generator"
 	"ride-sharing/internal/matchrun"
 	"time"
 )
@@ -11,35 +12,34 @@ import (
 // 前端传给后端什么
 
 const maxPreviewSize = 500
-const maxHttpRunTimeOut = 2*time.Minute // 120s = 2min
+const maxHttpRunTimeOut = 2 * time.Minute // 120s = 2min
 
 // 定义一个专用 HTTP 请求类型，只接收页面允许控制的参数
 
-type Request struct{
-	RiderCount	int	`json:"riderCount"`
-	OrderCount	int	`json:"orderCount"`
-	ArrivalWindow	string	`json:"arrivalWindow"`
-	ArrivalModel	string	`json:"arrivalModel"`
-	Seed	int64	`json:"seed"`
-	RiderDistribution	string	`json:"riderDistribution"`
-	OrderDistribution	string	`json:"orderDistribution"`
-	Algorithm	string	`json:"algorithm"`
-	Strategy	string	`json:"strategy"`
-	Workers	int	`json:"workers"`
-	BatchSize	int	`json:"batchSize"`
-	ChannelCapacity	int	`json:"channelCapacity"`
-	TopK	int	`json:"topK"`
-	MaxExtraDistanceMeters	float64	`json:"maxExtraDistanceMeters"`
-	MaxOrdersPerRider	int	`json:"maxOrdersPerRider"`
-	PreviewSize	int	`json:"previewSize"`
+type Request struct {
+	RiderCount             int     `json:"riderCount"`
+	OrderCount             int     `json:"orderCount"`
+	ArrivalWindow          string  `json:"arrivalWindow"`
+	ArrivalModel           string  `json:"arrivalModel"`
+	Seed                   int64   `json:"seed"`
+	RiderDistribution      string  `json:"riderDistribution"`
+	OrderDistribution      string  `json:"orderDistribution"`
+	Algorithm              string  `json:"algorithm"`
+	Strategy               string  `json:"strategy"`
+	Workers                int     `json:"workers"`
+	BatchSize              int     `json:"batchSize"`
+	ChannelCapacity        int     `json:"channelCapacity"`
+	TopK                   int     `json:"topK"`
+	MaxExtraDistanceMeters float64 `json:"maxExtraDistanceMeters"`
+	MaxOrdersPerRider      int     `json:"maxOrdersPerRider"`
+	PreviewSize            int     `json:"previewSize"`
 }
 
-
 type RetryRequest struct {
-	RunID	string 	`json:"runId"`
-	SourceRound int	`json:"sourceRound"`
-	MaxOrdersPerRider int	`json:"maxOrdersPerRider"`
-	GracePeriodMs int64	`json:"gracePeriodMs"`
+	RunID             string `json:"runId"`
+	SourceRound       int    `json:"sourceRound"`
+	MaxOrdersPerRider int    `json:"maxOrdersPerRider"`
+	GracePeriodMs     int64  `json:"gracePeriodMs"`
 }
 
 func (r Request) toRunRequest() (matchrun.Request, error) {
@@ -55,7 +55,7 @@ func (r Request) toRunRequest() (matchrun.Request, error) {
 		return matchrun.Request{}, fmt.Errorf("maxOrdersPerRider cannot be negative")
 	}
 
-	arrivalWindow, err := time.ParseDuration(r.ArrivalWindow) 
+	arrivalWindow, err := time.ParseDuration(r.ArrivalWindow)
 	if err != nil {
 		return matchrun.Request{}, fmt.Errorf("parse arrivalWindow: %w", err)
 	}
@@ -75,20 +75,18 @@ func (r Request) toRunRequest() (matchrun.Request, error) {
 
 	cfg.RunTimeout = maxHttpRunTimeOut //
 
-
 	cfg.Algorithm = config.Algorithm(r.Algorithm)
 	cfg.Strategy = config.Strategy(r.Strategy)
-	cfg.ArrivalModel = generator.ArrivalModel(r.ArrivalModel)
-	cfg.OrderDistribution = generator.SpatialDistribution(r.OrderDistribution)
-	cfg.RiderDistribution = generator.SpatialDistribution(r.RiderDistribution)
-
+	cfg.ArrivalModel = orders.ArrivalModel(r.ArrivalModel)
+	cfg.OrderDistribution = simulation.SpatialDistribution(r.OrderDistribution)
+	cfg.RiderDistribution = simulation.SpatialDistribution(r.RiderDistribution)
 
 	if err := cfg.Validate(); err != nil {
 		return matchrun.Request{}, fmt.Errorf("validate matcher request: %w", err)
 	}
 
 	return matchrun.Request{
-		Config: cfg,
+		Config:      cfg,
 		PreviewSize: r.PreviewSize,
 	}, nil
 

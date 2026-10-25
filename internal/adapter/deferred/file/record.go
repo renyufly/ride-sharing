@@ -1,17 +1,17 @@
-package deferred
+package file
 
 import (
+	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/order"
-	"ride-sharing/internal/pipeline"
 )
 
 type deferredRecord struct {
-	Version      int                     `json:"version"`
-	Attempt      uint32                  `json:"attempt"`
-	Reason       pipeline.DeferredReason `json:"reason"`
-	DeferredAtNs int64                   `json:"deferredAtNs"`
-	Order        orderRecord             `json:"order"`
+	Version      int                        `json:"version"`
+	Attempt      uint32                     `json:"attempt"`
+	Reason       appmatching.DeferredReason `json:"reason"`
+	DeferredAtNs int64                      `json:"deferredAtNs"`
+	Order        orderRecord                `json:"order"`
 }
 
 type orderRecord struct {
@@ -32,7 +32,7 @@ type pointRecord struct {
 	Y float64 `json:"yMeters"`
 }
 
-func newDeferredRecord(order pipeline.DeferredOrder) deferredRecord {
+func newDeferredRecord(order appmatching.DeferredOrder) deferredRecord {
 	return deferredRecord{
 		Version:      1,
 		Attempt:      order.Attempt,

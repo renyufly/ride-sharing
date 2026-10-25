@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"ride-sharing/internal/adapter/simulation/orders"
 	"time"
 
-	"ride-sharing/internal/generator"
+	"ride-sharing/internal/adapter/simulation"
 )
 
 // errors      创建/合并错误
@@ -48,34 +49,34 @@ const (
 // Config contains the complete runtime surface. TopK and
 // MaxExtraDistanceMeters are explicit strategy B controls; validation rejects
 // them for the default nearest-rider strategy.
-type Config struct {  // 一次 benchmark 的完整配置
-	RiderCount             int     // 骑手/司机 数量
-	OrderCount             int     // 订单数量
-	ArrivalWindow          time.Duration   // 订单在多久内到达
-	RunTimeout             time.Duration   // 整个测试最大运行时间
-	MonitorInterval        time.Duration   // 多久采样一次资源使用
-	ArrivalModel           generator.ArrivalModel  // uniform-window-订单均匀进入，front-loaded-burst-大量订单集中在开始阶段，unbounded-不按照固定 arrival window 节流
-	Seed                   int64   // 随机数种子
-	RiderDistribution      generator.SpatialDistribution  // 骑手怎么分布：uniform-均匀分布，hotspot-大量订单集中在热点区域
-	OrderDistribution      generator.SpatialDistribution
-	Algorithm              Algorithm  // brute-force / KD-tree
-	Workers                int    // worker goroutine 数量
-	BatchSize              int    // 每批多少订单
-	ChannelCapacity        int    // channel 缓冲大小
+type Config struct { // 一次 benchmark 的完整配置
+	RiderCount             int                            // 骑手/司机 数量
+	OrderCount             int                            // 订单数量
+	ArrivalWindow          time.Duration                  // 订单在多久内到达
+	RunTimeout             time.Duration                  // 整个测试最大运行时间
+	MonitorInterval        time.Duration                  // 多久采样一次资源使用
+	ArrivalModel           orders.ArrivalModel            // uniform-window-订单均匀进入，front-loaded-burst-大量订单集中在开始阶段，unbounded-不按照固定 arrival window 节流
+	Seed                   int64                          // 随机数种子
+	RiderDistribution      simulation.SpatialDistribution // 骑手怎么分布：uniform-均匀分布，hotspot-大量订单集中在热点区域
+	OrderDistribution      simulation.SpatialDistribution
+	Algorithm              Algorithm // brute-force / KD-tree
+	Workers                int       // worker goroutine 数量
+	BatchSize              int       // 每批多少订单
+	ChannelCapacity        int       // channel 缓冲大小
 	Strategy               Strategy
-	TopK                   int    // balanced 考虑最近几个骑手
-	MaxExtraDistanceMeters float64   // 为均衡最多允许多远 (防止 balanced 做得太过头)
-	MaxOrdersPerRider 	   int  // 限制每个骑手最多订单上限
-	DeferredOutput 		   string  // deferred 输出的jsonL文件
-	Attempt 			   uint   // 第几轮尝试
-	DeferredInput 		   string  // deferred 输入的jsonL文件
+	TopK                   int     // balanced 考虑最近几个骑手
+	MaxExtraDistanceMeters float64 // 为均衡最多允许多远 (防止 balanced 做得太过头)
+	MaxOrdersPerRider      int     // 限制每个骑手最多订单上限
+	DeferredOutput         string  // deferred 输出的jsonL文件
+	Attempt                uint    // 第几轮尝试
+	DeferredInput          string  // deferred 输入的jsonL文件
 }
 
 // DisplayConfig is the stable, human-readable representation printed at
 // startup. Durations are strings so a run can be copied into an interview or
 // benchmark report without converting nanoseconds.
-type DisplayConfig struct {  // 方便输出报告
-	RiderCount             int     `json:"riderCount"`   // struct tag：告诉 JSON 编码器输出的名字
+type DisplayConfig struct { // 方便输出报告
+	RiderCount             int     `json:"riderCount"` // struct tag：告诉 JSON 编码器输出的名字
 	OrderCount             int     `json:"orderCount"`
 	ArrivalWindow          string  `json:"arrivalWindow"`
 	RunTimeout             string  `json:"runTimeout"`
@@ -91,10 +92,10 @@ type DisplayConfig struct {  // 方便输出报告
 	Strategy               string  `json:"strategy"`
 	TopK                   int     `json:"topK"`
 	MaxExtraDistanceMeters float64 `json:"maxExtraDistanceMeters"`
-	MaxOrdersPerRider 	   int  `json:"maxOrdersPerRider"`
-	DeferredOutput 		   string  `json:"deferredOutput"`// deferred 输出的jsonL文件
-	Attempt 			   uint 	`json:"attempt"`
-	DeferredInput 		   string   `json:"deferredInput"`
+	MaxOrdersPerRider      int     `json:"maxOrdersPerRider"`
+	DeferredOutput         string  `json:"deferredOutput"` // deferred 输出的jsonL文件
+	Attempt                uint    `json:"attempt"`
+	DeferredInput          string  `json:"deferredInput"`
 }
 
 // 默认配置：
@@ -111,16 +112,16 @@ func Default() Config {
 		ArrivalWindow:     30 * time.Second,
 		RunTimeout:        0,
 		MonitorInterval:   100 * time.Millisecond,
-		ArrivalModel:      generator.ArrivalUniformWindow,
+		ArrivalModel:      orders.ArrivalUniformWindow,
 		Seed:              42,
-		RiderDistribution: generator.DistributionUniform,
-		OrderDistribution: generator.DistributionUniform,
+		RiderDistribution: simulation.DistributionUniform,
+		OrderDistribution: simulation.DistributionUniform,
 		Algorithm:         AlgorithmKDTree,
 		Workers:           2,
 		BatchSize:         1,
 		ChannelCapacity:   16,
 		Strategy:          StrategyNearest,
-		Attempt: 1,
+		Attempt:           1,
 	}
 }
 
@@ -129,7 +130,7 @@ func Default() Config {
 func Parse(args []string) (Config, error) {
 	cfg := Default()
 	flags := flag.NewFlagSet("matcher", flag.ContinueOnError) // 创建一个独立的命令行参数解析器 (为了测试隔离)
-	flags.SetOutput(io.Discard) // flag 解析错误时，不要自动往终端打印东西
+	flags.SetOutput(io.Discard)                               // flag 解析错误时，不要自动往终端打印东西
 
 	algorithm := string(cfg.Algorithm)
 	arrivalModel := string(cfg.ArrivalModel)
@@ -164,7 +165,6 @@ func Parse(args []string) (Config, error) {
 	flags.UintVar(&cfg.Attempt, "attempt", cfg.Attempt, "current round of attemptation")
 
 	flags.StringVar(&cfg.DeferredInput, "deferred-input", cfg.DeferredInput, "input file of deferred orders")
-	
 
 	if err := flags.Parse(args); err != nil {
 		return Config{}, err
@@ -174,9 +174,9 @@ func Parse(args []string) (Config, error) {
 	}
 
 	cfg.Algorithm = Algorithm(algorithm)
-	cfg.ArrivalModel = generator.ArrivalModel(arrivalModel)
-	cfg.RiderDistribution = generator.SpatialDistribution(riderDistribution)
-	cfg.OrderDistribution = generator.SpatialDistribution(orderDistribution)
+	cfg.ArrivalModel = orders.ArrivalModel(arrivalModel)
+	cfg.RiderDistribution = simulation.SpatialDistribution(riderDistribution)
+	cfg.OrderDistribution = simulation.SpatialDistribution(orderDistribution)
 	cfg.Strategy = Strategy(strategy)
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -202,13 +202,13 @@ func (c Config) Validate() error {
 	if c.MonitorInterval <= 0 {
 		errs = append(errs, errors.New("monitor interval must be greater than zero"))
 	}
-	if err := generator.ValidateArrivalModel(c.ArrivalModel); err != nil {
+	if err := orders.ValidateArrivalModel(c.ArrivalModel); err != nil {
 		errs = append(errs, err)
 	}
-	if err := generator.ValidateSpatialDistribution(c.RiderDistribution); err != nil {
+	if err := simulation.ValidateSpatialDistribution(c.RiderDistribution); err != nil {
 		errs = append(errs, fmt.Errorf("rider distribution: %w", err))
 	}
-	if err := generator.ValidateSpatialDistribution(c.OrderDistribution); err != nil {
+	if err := simulation.ValidateSpatialDistribution(c.OrderDistribution); err != nil {
 		errs = append(errs, fmt.Errorf("order distribution: %w", err))
 	}
 	if c.Algorithm != AlgorithmBruteForce && c.Algorithm != AlgorithmKDTree {
@@ -244,7 +244,7 @@ func (c Config) Validate() error {
 	return errors.Join(errs...)
 }
 
-func (c Config) Display() DisplayConfig {  //  把内部运行配置转换成人类方便阅读的版本
+func (c Config) Display() DisplayConfig { //  把内部运行配置转换成人类方便阅读的版本
 	return DisplayConfig{
 		RiderCount:             c.RiderCount,
 		OrderCount:             c.OrderCount,
@@ -263,8 +263,8 @@ func (c Config) Display() DisplayConfig {  //  把内部运行配置转换成人
 		TopK:                   c.TopK,
 		MaxExtraDistanceMeters: c.MaxExtraDistanceMeters,
 		MaxOrdersPerRider:      c.MaxOrdersPerRider,
-		DeferredOutput : 		c.DeferredOutput,  // deferred 输出的jsonL文件
-		Attempt:				c.Attempt, 
-		DeferredInput: 			c.DeferredInput,
+		DeferredOutput:         c.DeferredOutput, // deferred 输出的jsonL文件
+		Attempt:                c.Attempt,
+		DeferredInput:          c.DeferredInput,
 	}
 }

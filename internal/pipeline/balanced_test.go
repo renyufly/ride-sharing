@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"ride-sharing/internal/adapter/simulation/orders"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
@@ -104,7 +105,7 @@ func TestBalancedReordersCandidateResultsDeterministically(t *testing.T) {
 
 func TestBalancedLargeBatchesCannotStarveNextSequence(t *testing.T) {
 	dataGenerator, riders, matcher := testData(t, 1_000)
-	stream, err := dataGenerator.NewOrderStream(100_000, 0, "unbounded", "uniform")
+	stream, err := orders.NewStream(dataGenerator, 100_000, 0, "unbounded", "uniform")
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}
@@ -125,7 +126,7 @@ func TestBalancedLargeBatchesCannotStarveNextSequence(t *testing.T) {
 
 func TestBalancedRunDoesNotChangeNearestStrategy(t *testing.T) {
 	dataGenerator, riders, matcher := testData(t, 100)
-	nearestBeforeStream, err := dataGenerator.NewOrderStream(10_000, 0, "unbounded", "uniform")
+	nearestBeforeStream, err := orders.NewStream(dataGenerator, 10_000, 0, "unbounded", "uniform")
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}
@@ -135,14 +136,14 @@ func TestBalancedRunDoesNotChangeNearestStrategy(t *testing.T) {
 		t.Fatalf("nearest before error = %v", err)
 	}
 
-	balancedStream, _ := dataGenerator.NewOrderStream(10_000, 0, "unbounded", "uniform")
+	balancedStream, _ := orders.NewStream(dataGenerator, 10_000, 0, "unbounded", "uniform")
 	if _, err := RunBalanced(context.Background(), balancedStream, matcher, riders, BalancedOptions{
 		Options: nearestOptions, TopK: 8, MaxExtraDistanceMeters: 300,
 	}); err != nil {
 		t.Fatalf("balanced run error = %v", err)
 	}
 
-	nearestAfterStream, _ := dataGenerator.NewOrderStream(10_000, 0, "unbounded", "uniform")
+	nearestAfterStream, _ := orders.NewStream(dataGenerator, 10_000, 0, "unbounded", "uniform")
 	after, err := Run(context.Background(), nearestAfterStream, matcher, riders, nearestOptions)
 	if err != nil {
 		t.Fatalf("nearest after error = %v", err)

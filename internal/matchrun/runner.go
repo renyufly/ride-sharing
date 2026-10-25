@@ -5,15 +5,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"ride-sharing/internal/adapter/deferred/file"
+	"ride-sharing/internal/adapter/simulation"
+	"ride-sharing/internal/adapter/simulation/orders"
+	"ride-sharing/internal/adapter/simulation/riders"
 	"ride-sharing/internal/adapter/spatial/bruteforce"
 	"ride-sharing/internal/adapter/spatial/kdtree"
+	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/config"
-	"ride-sharing/internal/deferred"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
-	"ride-sharing/internal/generator"
 	matchrule "ride-sharing/internal/matcher"
 
 	"ride-sharing/internal/pipeline"
@@ -45,10 +48,10 @@ func createMatcher(cfg config.Config, riders []rider.Rider) (nearestMatcher, err
 }
 
 // 订单源辅助函数
-func createOrderSource(cfg *config.Config, dataGenerator generator.Generator) (pipeline.OrderSource, uint64, io.Closer, error) {
+func createOrderSource(cfg *config.Config, dataGenerator simulation.Scenario) (appmatching.OrderSource, uint64, io.Closer, error) {
 
 	if cfg.DeferredInput == "" {
-		generatedStream, err := dataGenerator.NewOrderStream(cfg.OrderCount, cfg.ArrivalWindow, cfg.ArrivalModel, cfg.OrderDistribution)
+		generatedStream, err := orders.NewStream(dataGenerator, cfg.OrderCount, cfg.ArrivalWindow, cfg.ArrivalModel, cfg.OrderDistribution)
 		if err != nil {
 			return nil, 0, nil, fmt.Errorf("create generated order stream: %w", err)
 		}
@@ -61,7 +64,7 @@ func createOrderSource(cfg *config.Config, dataGenerator generator.Generator) (p
 	}
 	expectedInputAttempt := cfg.Attempt - 1
 
-	filesource, count, err := deferred.OpenFileSource(cfg.DeferredInput, uint32(expectedInputAttempt))
+	filesource, count, err := file.OpenFileSource(cfg.DeferredInput, uint32(expectedInputAttempt))
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("%w", err)
 	}
@@ -139,13 +142,13 @@ func Run(ctx context.Context, req Request) (ret Result, resultErr error) {
 	// TODO
 	riderGenerationStarted := time.Now()
 
-	dataGenerator, err := generator.New(effectiveConfig.Seed, geo.SanFranciscoBounds)
+	dataGenerator, err := simulation.New(effectiveConfig.Seed, geo.SanFranciscoBounds)
 	if err != nil {
 		return Result{}, fmt.Errorf("%w", err)
 	}
 
 	// 生成 Riders
-	riders, err := dataGenerator.GenerateRiders(effectiveConfig.RiderCount, effectiveConfig.RiderDistribution)
+	riders, err := riders.Generate(dataGenerator, effectiveConfig.RiderCount, effectiveConfig.RiderDistribution)
 	if err != nil {
 		return ret, fmt.Errorf("generate riders: %w", err)
 	}
@@ -161,7 +164,7 @@ func Run(ctx context.Context, req Request) (ret Result, resultErr error) {
 
 	indexBuildDuration := time.Since(indexBuildStarted)
 
-	var orderSource pipeline.OrderSource
+	var orderSource appmatching.OrderSource
 	var expectedOrders uint64
 	var sourceCloser io.Closer
 

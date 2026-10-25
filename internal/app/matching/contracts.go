@@ -1,4 +1,4 @@
-package pipeline
+package matching
 
 import (
 	"context"
@@ -24,4 +24,9 @@ type DeferredOrder struct {
 
 type DeferredOrderSink interface {
 	Store(ctx context.Context, deferOrder DeferredOrder) error
+}
+
+// OrderSource supplies orders one at a time to a matching run.
+type OrderSource interface {
+	Next() (order.Order, bool, error)
 }

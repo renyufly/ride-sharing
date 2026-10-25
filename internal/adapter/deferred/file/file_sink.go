@@ -1,4 +1,4 @@
-package deferred
+package file
 
 import (
 	"bufio"
@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"ride-sharing/internal/pipeline"
+	appmatching "ride-sharing/internal/app/matching"
 )
 
 // FileSink 实现了 DeferredOrderSink 接口，负责将延迟订单以 JSONL 形式落盘
@@ -18,8 +18,6 @@ type FileSink struct {
 	jsonEncoder    *json.Encoder
 	closed         bool
 }
-
-
 
 func NewFileSink(filePath string) (*FileSink, error) {
 	if filePath == "" {
@@ -33,7 +31,6 @@ func NewFileSink(filePath string) (*FileSink, error) {
 			return nil, fmt.Errorf("failed to create directory %s: %w", dir, err)
 		}
 	}
-	
 
 	file, err := os.OpenFile(filePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0644)
 	if err != nil {
@@ -47,33 +44,33 @@ func NewFileSink(filePath string) (*FileSink, error) {
 	encode := json.NewEncoder(bufWriter)
 
 	return &FileSink{
-		file: file,
+		file:           file,
 		bufferedWriter: bufWriter,
-		jsonEncoder: encode,
+		jsonEncoder:    encode,
 	}, nil
 
 }
 
 // Store 写入单笔 DeferredOrder
 // 内部将数据转为 DTO 并编码为单行 JSON (JSONL)
-func (s *FileSink) Store(ctx context.Context, deferredOrder pipeline.DeferredOrder) error {
+func (s *FileSink) Store(ctx context.Context, deferredOrder appmatching.DeferredOrder) error {
 	if s.closed {
 		return errors.New("sink is closed")
 	}
 
 	select {
-	case <- ctx.Done():
+	case <-ctx.Done():
 		return ctx.Err()
 	default:
 	}
 
 	record := newDeferredRecord(deferredOrder)
 
-	if err:= s.jsonEncoder.Encode(record); err != nil {
+	if err := s.jsonEncoder.Encode(record); err != nil {
 		return fmt.Errorf("failed to encode deferred order json: %w", err)
 	}
 
-	return nil 
+	return nil
 }
 
 // Close 刷盘并关闭底层文件资源

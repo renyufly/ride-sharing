@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
@@ -187,7 +188,7 @@ type coordinatorResult struct {
 	deferred                  uint64
 	deferredByCapacity        uint64
 	deferredByWindow          uint64
-	deferredPreview           []DeferredOrder
+	deferredPreview           []appmatching.DeferredOrder
 	capacityFiltered          uint64
 }
 
@@ -206,11 +207,11 @@ func (e *CandidatePanicError) Error() string {
 // 实际执行
 func RunBalanced(
 	ctx context.Context,
-	source OrderSource,
+	source appmatching.OrderSource,
 	matcher CandidateMatcher,
 	riders []rider.Rider,
 	options BalancedOptions,
-	deferredSink DeferredOrderSink,
+	deferredSink appmatching.DeferredOrderSink,
 ) (Result, error) {
 	if ctx == nil {
 		return Result{}, errors.New("context cannot be nil")
@@ -359,14 +360,15 @@ func firstError(values ...error) error {
 }
 
 // source.Next()
-//  等待 PlannedArrival
-//  从 candidatePool 获取 envelope
-//  凑成 Batch 后发送
+//
+//	等待 PlannedArrival
+//	从 candidatePool 获取 envelope
+//	凑成 Batch 后发送
 func produceBalanced(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	start time.Time,
-	source OrderSource,
+	source appmatching.OrderSource,
 	batches chan<- *balancedBatch,
 	pool chan *balancedBatch,
 	resultPool chan *candidateResult,
@@ -596,10 +598,10 @@ func coordinateBalanced(
 	riders []rider.Rider,
 	options BalancedOptions,
 	output chan<- coordinatorResult,
-	deferredSink DeferredOrderSink,
+	deferredSink appmatching.DeferredOrderSink,
 ) {
 	reporter, err := report.New(riders)
-	state := coordinatorResult{preview: make([]matching.Assignment, 0, options.PreviewSize), deferredPreview: make([]DeferredOrder, 0, options.PreviewSize), reporter: reporter}
+	state := coordinatorResult{preview: make([]matching.Assignment, 0, options.PreviewSize), deferredPreview: make([]appmatching.DeferredOrder, 0, options.PreviewSize), reporter: reporter}
 	if err != nil {
 		state.err = fmt.Errorf("create balanced reporter: %w", err)
 		cancel()
@@ -671,9 +673,9 @@ func coordinateBalanced(
 					// 超时，不能分配
 					deferredAt := time.Since(start).Nanoseconds()
 
-					deferredOrder := DeferredOrder{
+					deferredOrder := appmatching.DeferredOrder{
 						Order:        ready.order,
-						Reason:       DeferredReasonWindowExpired,
+						Reason:       appmatching.DeferredReasonWindowExpired,
 						DeferredAtNs: deferredAt,
 						Attempt:      options.Attempt,
 					}
@@ -720,9 +722,9 @@ func coordinateBalanced(
 					// 全部满额度
 					deferredAt := time.Since(start).Nanoseconds()
 
-					deferredOrder := DeferredOrder{
+					deferredOrder := appmatching.DeferredOrder{
 						Order:        ready.order,
-						Reason:       DeferredReasonCapacityExhausted,
+						Reason:       appmatching.DeferredReasonCapacityExhausted,
 						DeferredAtNs: deferredAt,
 						Attempt:      options.Attempt,
 					}
@@ -739,9 +741,9 @@ func coordinateBalanced(
 					if len(state.deferredPreview) < options.PreviewSize {
 						state.deferredPreview = append(
 							state.deferredPreview,
-							DeferredOrder{
+							appmatching.DeferredOrder{
 								Order:        ready.order,
-								Reason:       DeferredReasonCapacityExhausted,
+								Reason:       appmatching.DeferredReasonCapacityExhausted,
 								DeferredAtNs: deferredAt,
 							},
 						)

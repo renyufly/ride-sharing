@@ -1,10 +1,10 @@
 package matchrun
 
 import (
+	"ride-sharing/internal/adapter/simulation"
 	"ride-sharing/internal/config"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/rider"
-	"ride-sharing/internal/generator"
 	"ride-sharing/internal/matcher"
 	"ride-sharing/internal/pipeline"
 	"ride-sharing/internal/resource"
@@ -15,7 +15,7 @@ type Result struct {
 	Config              config.Config
 	Bounds              geo.BoundingBox
 	ProjectionOrigin    geo.GeoPoint
-	Seeds               generator.Seeds
+	Seeds               simulation.Seeds
 	EarthRadiusMeter    float64
 	GeneratedRiderCount int
 	RiderPreview        []rider.Rider

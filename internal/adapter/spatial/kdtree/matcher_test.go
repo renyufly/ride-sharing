@@ -3,14 +3,16 @@ package kdtree
 import (
 	"math"
 	"reflect"
+	"ride-sharing/internal/adapter/simulation/orders"
+	"ride-sharing/internal/adapter/simulation/riders"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
 	"testing"
 	"time"
 
+	"ride-sharing/internal/adapter/simulation"
 	"ride-sharing/internal/adapter/spatial/bruteforce"
 	"ride-sharing/internal/domain/geo"
-	"ride-sharing/internal/generator"
 )
 
 func TestMatchReturnsGlobalNearestRider(t *testing.T) {
@@ -73,10 +75,10 @@ func TestDuplicateCoordinatesAndDegenerateDistribution(t *testing.T) {
 }
 
 func TestMatchesBruteForceForGeneratedScenarios(t *testing.T) {
-	distributions := []generator.SpatialDistribution{
-		generator.DistributionUniform,
-		generator.DistributionHotspot,
-		generator.DistributionSkewed,
+	distributions := []simulation.SpatialDistribution{
+		simulation.DistributionUniform,
+		simulation.DistributionHotspot,
+		simulation.DistributionSkewed,
 	}
 	for _, riderDistribution := range distributions {
 		for _, orderDistribution := range distributions {
@@ -89,15 +91,15 @@ func TestMatchesBruteForceForGeneratedScenarios(t *testing.T) {
 }
 
 func TestMatchesBruteForceAtRequiredBaselineScale(t *testing.T) {
-	compareGeneratedMatchers(t, 100, 10_000, generator.DistributionUniform, generator.DistributionUniform)
+	compareGeneratedMatchers(t, 100, 10_000, simulation.DistributionUniform, simulation.DistributionUniform)
 }
 
 func TestTopKMatchesBruteForceAndIsStable(t *testing.T) {
-	dataGenerator, err := generator.New(91, geo.SanFranciscoBounds)
+	dataGenerator, err := simulation.New(91, geo.SanFranciscoBounds)
 	if err != nil {
-		t.Fatalf("generator.New() error = %v", err)
+		t.Fatalf("simulation.New() error = %v", err)
 	}
-	riders, err := dataGenerator.GenerateRiders(127, generator.DistributionHotspot)
+	riders, err := riders.Generate(dataGenerator, 127, simulation.DistributionHotspot)
 	if err != nil {
 		t.Fatalf("GenerateRiders() error = %v", err)
 	}
@@ -106,7 +108,7 @@ func TestTopKMatchesBruteForceAndIsStable(t *testing.T) {
 		t.Fatalf("bruteforce.New() error = %v", err)
 	}
 	tree := mustMatcher(t, riders)
-	stream, err := dataGenerator.NewOrderStream(500, 0, generator.ArrivalUnbounded, generator.DistributionSkewed)
+	stream, err := orders.NewStream(dataGenerator, 500, 0, orders.ArrivalUnbounded, simulation.DistributionSkewed)
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}
@@ -153,11 +155,11 @@ func TestTopKBreaksEqualDistanceByUID(t *testing.T) {
 }
 
 func TestMatchesBruteForceOnBoundaryOrders(t *testing.T) {
-	dataGenerator, err := generator.New(42, geo.SanFranciscoBounds)
+	dataGenerator, err := simulation.New(42, geo.SanFranciscoBounds)
 	if err != nil {
-		t.Fatalf("generator.New() error = %v", err)
+		t.Fatalf("simulation.New() error = %v", err)
 	}
-	riders, err := dataGenerator.GenerateRiders(100, generator.DistributionUniform)
+	riders, err := riders.Generate(dataGenerator, 100, simulation.DistributionUniform)
 	if err != nil {
 		t.Fatalf("GenerateRiders() error = %v", err)
 	}
@@ -187,11 +189,11 @@ func TestMatchesBruteForceOnBoundaryOrders(t *testing.T) {
 }
 
 func TestTreeBoundsContainEveryNodeAndChild(t *testing.T) {
-	dataGenerator, err := generator.New(55, geo.SanFranciscoBounds)
+	dataGenerator, err := simulation.New(55, geo.SanFranciscoBounds)
 	if err != nil {
-		t.Fatalf("generator.New() error = %v", err)
+		t.Fatalf("simulation.New() error = %v", err)
 	}
-	riders, err := dataGenerator.GenerateRiders(1_000, generator.DistributionSkewed)
+	riders, err := riders.Generate(dataGenerator, 1_000, simulation.DistributionSkewed)
 	if err != nil {
 		t.Fatalf("GenerateRiders() error = %v", err)
 	}
@@ -238,13 +240,13 @@ func TestNewOwnsRiderCoordinates(t *testing.T) {
 	}
 }
 
-func compareGeneratedMatchers(t *testing.T, riderCount, orderCount int, riderDistribution, orderDistribution generator.SpatialDistribution) {
+func compareGeneratedMatchers(t *testing.T, riderCount, orderCount int, riderDistribution, orderDistribution simulation.SpatialDistribution) {
 	t.Helper()
-	dataGenerator, err := generator.New(42, geo.SanFranciscoBounds)
+	dataGenerator, err := simulation.New(42, geo.SanFranciscoBounds)
 	if err != nil {
-		t.Fatalf("generator.New() error = %v", err)
+		t.Fatalf("simulation.New() error = %v", err)
 	}
-	riders, err := dataGenerator.GenerateRiders(riderCount, riderDistribution)
+	riders, err := riders.Generate(dataGenerator, riderCount, riderDistribution)
 	if err != nil {
 		t.Fatalf("GenerateRiders() error = %v", err)
 	}
@@ -253,7 +255,7 @@ func compareGeneratedMatchers(t *testing.T, riderCount, orderCount int, riderDis
 		t.Fatalf("bruteforce.New() error = %v", err)
 	}
 	tree := mustMatcher(t, riders)
-	stream, err := dataGenerator.NewOrderStream(orderCount, 30*time.Second, generator.ArrivalUniformWindow, orderDistribution)
+	stream, err := orders.NewStream(dataGenerator, orderCount, 30*time.Second, orders.ArrivalUniformWindow, orderDistribution)
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}

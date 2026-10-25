@@ -1,4 +1,4 @@
-package deferred
+package file
 
 import (
 	"bufio"
@@ -143,7 +143,7 @@ func OpenFileSource(filePath string, expectedAttempt uint32) (*FileSource, uint6
 
 }
 
-// 实现 pipeline.OrderSource interface
+// 实现 appmatching.OrderSource interface
 func (s *FileSource) Next() (order.Order, bool, error) {
 	if s.closed {
 		return order.Order{}, false, fmt.Errorf("wrong closed file")

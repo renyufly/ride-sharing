@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
@@ -26,10 +27,6 @@ import (
 // 策略A-严格选择最近骑手
 
 // pipeline 不关心具体实现
-type OrderSource interface {
-	Next() (order.Order, bool, error)
-}
-
 type Matcher interface {
 	Match(order.Order) (matching.Assignment, error)
 }
@@ -66,27 +63,27 @@ func (o Options) Validate() error {
 }
 
 type Result struct {
-	GeneratedOrders            uint64                `json:"generatedOrders"`
-	AdmittedOrders             uint64                `json:"admittedOrders"`
-	CompletedOrders            uint64                `json:"completedOrders"`  // 成功分配的订单
-	UnfinishedOrders           uint64                `json:"unfinishedOrders"` //  未分配，推迟 DeferredOrders
-	LastPlannedArrivalNs       int64                 `json:"lastPlannedArrivalNs"`
-	MaxQueueDepth              int                   `json:"maxQueueDepthBatches"`
-	Performance                PerformanceMetrics    `json:"performance"`
-	StrategyDetails            *StrategyMetrics      `json:"strategyDetails,omitempty"`
-	WorkerCompleted            []uint64              `json:"workerCompletedOrders"`
-	OrderPreview               []order.Order         `json:"-"`
-	AssignmentPreview          []matching.Assignment `json:"-"`
-	Report                     report.Summary        `json:"report"`
-	GeneratedWithinWindow      uint64                `json:"generatedWithinWindow"`
-	AdmittedWithinWindow       uint64                `json:"admittedWithinWindow"`
-	CompletedWithinWindow      uint64                `json:"completedWithinWindow"`
-	DeferredOrders             uint64                `json:"deferredOrders"`
-	DeferredByCapacity         uint64                `json:"deferredByCapacity"`
-	DeferredByWindow           uint64                `json:"deferredByWindow"`
-	DeferredPreview            []DeferredOrder       `json:"deferredPreview"`
-	MaxOrdersPerRider          int                   `json:"maxOrdersPerRider"`
-	CapacityFilteredCandidates uint64                `json:"capacityFilteredCandidates"`
+	GeneratedOrders            uint64                      `json:"generatedOrders"`
+	AdmittedOrders             uint64                      `json:"admittedOrders"`
+	CompletedOrders            uint64                      `json:"completedOrders"`  // 成功分配的订单
+	UnfinishedOrders           uint64                      `json:"unfinishedOrders"` //  未分配，推迟 DeferredOrders
+	LastPlannedArrivalNs       int64                       `json:"lastPlannedArrivalNs"`
+	MaxQueueDepth              int                         `json:"maxQueueDepthBatches"`
+	Performance                PerformanceMetrics          `json:"performance"`
+	StrategyDetails            *StrategyMetrics            `json:"strategyDetails,omitempty"`
+	WorkerCompleted            []uint64                    `json:"workerCompletedOrders"`
+	OrderPreview               []order.Order               `json:"-"`
+	AssignmentPreview          []matching.Assignment       `json:"-"`
+	Report                     report.Summary              `json:"report"`
+	GeneratedWithinWindow      uint64                      `json:"generatedWithinWindow"`
+	AdmittedWithinWindow       uint64                      `json:"admittedWithinWindow"`
+	CompletedWithinWindow      uint64                      `json:"completedWithinWindow"`
+	DeferredOrders             uint64                      `json:"deferredOrders"`
+	DeferredByCapacity         uint64                      `json:"deferredByCapacity"`
+	DeferredByWindow           uint64                      `json:"deferredByWindow"`
+	DeferredPreview            []appmatching.DeferredOrder `json:"deferredPreview"`
+	MaxOrdersPerRider          int                         `json:"maxOrdersPerRider"`
+	CapacityFilteredCandidates uint64                      `json:"capacityFilteredCandidates"`
 }
 
 type StrategyMetrics struct {
@@ -200,7 +197,7 @@ type admittedBatch struct {
 }
 
 // 整个 pipeline 的总指挥
-func Run(ctx context.Context, source OrderSource, matcher Matcher, riders []rider.Rider, options Options) (Result, error) {
+func Run(ctx context.Context, source appmatching.OrderSource, matcher Matcher, riders []rider.Rider, options Options) (Result, error) {
 	if ctx == nil {
 		return Result{}, errors.New("context cannot be nil")
 	}
@@ -369,7 +366,7 @@ func produce(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	start time.Time,
-	source OrderSource,
+	source appmatching.OrderSource,
 	batches chan<- *admittedBatch,
 	pool chan *admittedBatch,
 	options Options,
