@@ -5,14 +5,13 @@ package kdtree
 import (
 	"errors"
 	"fmt"
+	"ride-sharing/internal/app/report"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
 	"sort"
 	"unsafe"
-
-	matchrule "ride-sharing/internal/matcher"
 )
 
 // brute-force matcher 的高性能替代实现
@@ -42,11 +41,11 @@ type node struct {
 
 // 统计 KD-Tree 内存
 // 它只是估算 nodes 本身，不一定等于整个 Go 进程实际内存
-func (m Matcher) IndexStats() matchrule.IndexStats {
+func (m Matcher) IndexStats() report.IndexStats {
 	// 获取一个 node 在内存中占多少字节
 	entrySize := uint64(unsafe.Sizeof(node{}))
 
-	return matchrule.IndexStats{
+	return report.IndexStats{
 		Kind:           "kd-tree-node-slice",
 		EntryCount:     len(m.nodes),
 		EntrySizeBytes: entrySize,

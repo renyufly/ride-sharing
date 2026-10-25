@@ -1,4 +1,4 @@
-package matcher
+package report
 
 // 索引内存统计 (性能统计)
 type IndexStats struct {

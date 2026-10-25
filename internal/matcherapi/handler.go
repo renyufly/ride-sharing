@@ -7,10 +7,11 @@ import (
 	"io"
 	"net/http"
 	"ride-sharing/internal/adapter/deferred/memory"
+	"ride-sharing/internal/adapter/simulation/runsetup"
 	appmatching "ride-sharing/internal/app/matching"
+	"ride-sharing/internal/app/run"
+	"ride-sharing/internal/app/run/replay"
 	"ride-sharing/internal/config"
-	"ride-sharing/internal/matchrun"
-	"time"
 )
 
 // 后端收到请求后怎么处理
@@ -120,7 +121,7 @@ func (h *Handler) Run(w http.ResponseWriter, r *http.Request) {
 		runRequest.DeferredSink = memorySink
 	}
 
-	runResult, runErr := matchrun.Run(r.Context(), runRequest)
+	runResult, runErr := run.Run(r.Context(), runRequest, runsetup.Factory{})
 	if runErr != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
 			Error: "matcher run failed",
@@ -259,18 +260,6 @@ func (h *Handler) Retry(w http.ResponseWriter, r *http.Request) {
 	nextRound := session.currentRound + 1
 	inputCount := len(session.deferredOrders)
 
-	retryConfig := session.config
-
-	retryConfig.OrderCount = inputCount
-	retryConfig.Attempt = uint(nextRound)
-	retryConfig.MaxOrdersPerRider = apiRequest.MaxOrdersPerRider
-	retryConfig.DeferredInput = ""
-
-	if apiRequest.GracePeriodMs > 0 {
-		retryConfig.ArrivalWindow =
-			time.Duration(apiRequest.GracePeriodMs) * time.Millisecond
-	}
-
 	memorySink, err := memory.NewMemorySink(inputCount)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
@@ -280,17 +269,25 @@ func (h *Handler) Retry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	memorySource, err := memory.NewMemorySource(session.deferredOrders)
-
-	retryRequest := matchrun.Request{
-		Config:       retryConfig,
-		PreviewSize:  session.previewSize,
-		DeferredSink: memorySink,
-		OrderSource:  memorySource,
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "cannot create retry memory source"})
+		return
 	}
+
+	retryRequest, err := replay.Prepare(
+		session.config, session.currentRound, inputCount,
+		apiRequest.MaxOrdersPerRider, apiRequest.GracePeriodMs,
+		session.previewSize, memorySource, memorySink,
+	)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "cannot prepare retry run"})
+		return
+	}
+	retryConfig := retryRequest.Config
 
 	// 运行下一轮。
 
-	result, err := matchrun.Run(r.Context(), retryRequest)
+	result, err := run.Run(r.Context(), retryRequest, runsetup.Factory{})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{
 			Error: "matcher retry failed",

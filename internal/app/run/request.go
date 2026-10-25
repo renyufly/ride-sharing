@@ -1,4 +1,4 @@
-package matchrun
+package run
 
 import (
 	appmatching "ride-sharing/internal/app/matching"

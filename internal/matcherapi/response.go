@@ -1,9 +1,8 @@
 package matcherapi
 
 import (
-	"ride-sharing/internal/matcher"
-	"ride-sharing/internal/pipeline"
-	"ride-sharing/internal/report"
+	appmatching "ride-sharing/internal/app/matching"
+	"ride-sharing/internal/app/report"
 	"ride-sharing/internal/resource"
 )
 
@@ -12,20 +11,20 @@ import (
 
 // 成功响应-json
 type RunResponse struct {
-	// Result	matchrun.Result	`json:"result"`	 // Runner 的完整统计结果
+	// Result	run.Result	`json:"result"`	 // Runner 的完整统计结果
 	// OrderPreview	[]order.Order	`json:"orderPreview"`	// 地图上的订单抽样点
 	// AssignmentPreview	[]matching.Assignment	`json:"assignmentPreview"`	// 地图匹配连线
 	// Deferred	memory.MemorySnapshot    `json:"deferred"`  // 内存 sink 的累计数和抽样订单
-	Config      RunConfigResponse           `json:"config"`
-	Counts      RunCountsResponse           `json:"counts"`
-	Timing      RunTimingResponse           `json:"timing"`
-	Map         RunMapResponse              `json:"map"`
-	Performance pipeline.PerformanceMetrics `json:"performance"`
-	Fairness    report.Summary              `json:"fairness"`
-	Resources   resource.Stats              `json:"resources"`
-	Index       matcher.IndexStats          `json:"index"`
-	Strategy    *pipeline.StrategyMetrics   `json:"strategy,omitempty"`
-	Deferred    DeferredResponse            `json:"deferred"`
+	Config      RunConfigResponse              `json:"config"`
+	Counts      RunCountsResponse              `json:"counts"`
+	Timing      RunTimingResponse              `json:"timing"`
+	Map         RunMapResponse                 `json:"map"`
+	Performance appmatching.PerformanceMetrics `json:"performance"`
+	Fairness    report.Summary                 `json:"fairness"`
+	Resources   resource.Stats                 `json:"resources"`
+	Index       report.IndexStats              `json:"index"`
+	Strategy    *appmatching.StrategyMetrics   `json:"strategy,omitempty"`
+	Deferred    DeferredResponse               `json:"deferred"`
 
 	RunID        string          `json:"runId"`
 	CurrentRound int             `json:"currentRound"`

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"ride-sharing/internal/adapter/simulation"
 	"ride-sharing/internal/adapter/simulation/orders"
+	"ride-sharing/internal/app/run"
 	"ride-sharing/internal/config"
-	"ride-sharing/internal/matchrun"
 	"time"
 )
 
@@ -42,22 +42,22 @@ type RetryRequest struct {
 	GracePeriodMs     int64  `json:"gracePeriodMs"`
 }
 
-func (r Request) toRunRequest() (matchrun.Request, error) {
+func (r Request) toRunRequest() (run.Request, error) {
 	if r.PreviewSize < 0 {
-		return matchrun.Request{}, fmt.Errorf("preview must >= 0")
+		return run.Request{}, fmt.Errorf("preview must >= 0")
 	}
 
 	if r.PreviewSize > maxPreviewSize {
-		return matchrun.Request{}, fmt.Errorf("exceed the max preview size: %d", maxPreviewSize)
+		return run.Request{}, fmt.Errorf("exceed the max preview size: %d", maxPreviewSize)
 	}
 
 	if r.MaxOrdersPerRider < 0 {
-		return matchrun.Request{}, fmt.Errorf("maxOrdersPerRider cannot be negative")
+		return run.Request{}, fmt.Errorf("maxOrdersPerRider cannot be negative")
 	}
 
 	arrivalWindow, err := time.ParseDuration(r.ArrivalWindow)
 	if err != nil {
-		return matchrun.Request{}, fmt.Errorf("parse arrivalWindow: %w", err)
+		return run.Request{}, fmt.Errorf("parse arrivalWindow: %w", err)
 	}
 
 	cfg := config.Default()
@@ -82,10 +82,10 @@ func (r Request) toRunRequest() (matchrun.Request, error) {
 	cfg.RiderDistribution = simulation.SpatialDistribution(r.RiderDistribution)
 
 	if err := cfg.Validate(); err != nil {
-		return matchrun.Request{}, fmt.Errorf("validate matcher request: %w", err)
+		return run.Request{}, fmt.Errorf("validate matcher request: %w", err)
 	}
 
-	return matchrun.Request{
+	return run.Request{
 		Config:      cfg,
 		PreviewSize: r.PreviewSize,
 	}, nil

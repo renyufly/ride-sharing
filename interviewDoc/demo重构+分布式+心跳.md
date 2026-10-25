@@ -270,6 +270,10 @@ infra/                          沿用现有 Docker、Kubernetes 目录
 
 处理 `matchrun/runner.go` 时，把算法实现选择、生成器创建、文件源创建等具体装配与运行用例区分开；两个入口仍调用同一套运行能力。不要提前抽象未出现的第三种入口。
 
+**步骤四执行结果（2026-10-25）：**原 `pipeline` 的 nearest/balanced、有界队列、并行候选查询、按 Sequence 决策与容量选择已迁至 `internal/app/matching`；原 `report` 的累加、Bottom 10 和延迟直方图已迁至 `internal/app/report`，索引统计 `IndexStats` 也由报告层持有，字段与 `kind` 值未变。原 `matchrun` 的 `Request`、`Result` 和运行生命周期已迁至 `internal/app/run`。运行用例通过 `InputFactory` 接收准备好的骑手、订单源与静态搜索器；`internal/adapter/simulation/runsetup` 承担原 runner 中的具体生成器、brute-force/KD-tree 和文件 Deferred source 装配。CLI 与现有 HTTP Handler 都注入同一工厂。整轮 Deferred 重放的下一轮参数准备已收归 `internal/app/run/replay`，由原 Retry Handler 调用；单实例会话判断仍留待步骤五。原 `pipeline`、`report`、`matchrun` 和仅剩统计类型的 `matcher` 包已移除。
+
+**步骤四验证：**`go build ./...`、`go test -skip TestArrivalModels ./...` 通过；新运行测试覆盖 nearest/balanced 的分配与 Deferred 数量，新 HTTP 测试覆盖同步 Run/Retry、RunID、轮次与结果字段。已把迁移后的 balanced 测试补齐原本缺失的 sink 和 Attempt 参数，使并行匹配测试能够执行。全量测试仍只有步骤三已记录的生成器 `TestArrivalModels` 预期值与现有到达算法不一致，此步保持算法行为不变。
+
 ### 步骤 5：迁移配置、资源监控和单实例会话
 
 - `internal/config` → `internal/platform/config`：保留默认参数和现有校验；把 CLI 参数解析与 HTTP 请求映射的边界分清，避免应用层依赖命令行 flag。

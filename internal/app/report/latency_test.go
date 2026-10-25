@@ -1,15 +1,15 @@
-package pipeline
+package report
 
 import "testing"
 
 func TestLatencyHistogramSummarizesWithoutRetainingSamples(t *testing.T) {
 	values := []int64{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}
-	var histogram latencyHistogram
+	var histogram LatencyHistogram
 	for _, value := range values {
-		histogram.observe(value)
+		histogram.Observe(value)
 	}
 
-	summary := histogram.summary()
+	summary := histogram.Summary()
 	if summary.Count != uint64(len(values)) {
 		t.Fatalf("Count = %d, want %d", summary.Count, len(values))
 	}
@@ -25,15 +25,15 @@ func TestLatencyHistogramSummarizesWithoutRetainingSamples(t *testing.T) {
 }
 
 func TestLatencyHistogramMerge(t *testing.T) {
-	first := latencyHistogram{}
-	second := latencyHistogram{}
-	first.observe(-1)
-	first.observe(100)
-	second.observe(50)
-	second.observe(200)
-	first.merge(&second)
+	first := LatencyHistogram{}
+	second := LatencyHistogram{}
+	first.Observe(-1)
+	first.Observe(100)
+	second.Observe(50)
+	second.Observe(200)
+	first.Merge(&second)
 
-	summary := first.summary()
+	summary := first.Summary()
 	if summary.Count != 4 || summary.MinNs != 0 || summary.MaxNs != 200 {
 		t.Fatalf("merged summary = %+v", summary)
 	}

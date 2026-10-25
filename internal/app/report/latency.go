@@ -1,4 +1,4 @@
-package pipeline
+package report
 
 import "math/bits"
 
@@ -19,14 +19,17 @@ type LatencySummary struct {
 	MaxNs int64  `json:"maxNs"`
 }
 
-type latencyHistogram struct {
+type LatencyHistogram struct {
 	counts [latencyBucketCount]uint64
 	count  uint64
 	minNs  int64
 	maxNs  int64
 }
 
-func (h *latencyHistogram) observe(valueNs int64) {
+// Count returns the number of observations.
+func (h *LatencyHistogram) Count() uint64 { return h.count }
+
+func (h *LatencyHistogram) Observe(valueNs int64) {
 	if valueNs < 0 {
 		valueNs = 0
 	}
@@ -40,7 +43,7 @@ func (h *latencyHistogram) observe(valueNs int64) {
 	h.count++
 }
 
-func (h *latencyHistogram) merge(other *latencyHistogram) {
+func (h *LatencyHistogram) Merge(other *LatencyHistogram) {
 	if other == nil || other.count == 0 {
 		return
 	}
@@ -56,7 +59,7 @@ func (h *latencyHistogram) merge(other *latencyHistogram) {
 	h.count += other.count
 }
 
-func (h *latencyHistogram) summary() LatencySummary {
+func (h *LatencyHistogram) Summary() LatencySummary {
 	if h.count == 0 {
 		return LatencySummary{}
 	}
@@ -70,7 +73,7 @@ func (h *latencyHistogram) summary() LatencySummary {
 	}
 }
 
-func (h *latencyHistogram) percentile(percent uint64) int64 {
+func (h *LatencyHistogram) percentile(percent uint64) int64 {
 	target := (h.count*percent + 99) / 100
 	var cumulative uint64
 	for index, count := range h.counts {

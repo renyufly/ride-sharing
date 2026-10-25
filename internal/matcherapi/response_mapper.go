@@ -3,16 +3,16 @@ package matcherapi
 import (
 	"math"
 	"ride-sharing/internal/adapter/deferred/memory"
+	appmatching "ride-sharing/internal/app/matching"
+	"ride-sharing/internal/app/run"
 	"ride-sharing/internal/config"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
-	"ride-sharing/internal/matchrun"
-	"ride-sharing/internal/pipeline"
 )
 
-func toRunResponse(result matchrun.Result, snapshot memory.MemorySnapshot, previewSize int, runid string, currentRound int, rounds []RoundResponse) RunResponse {
+func toRunResponse(result run.Result, snapshot memory.MemorySnapshot, previewSize int, runid string, currentRound int, rounds []RoundResponse) RunResponse {
 	return RunResponse{
 		Config:      mapRunConfig(result.Config, previewSize),
 		Counts:      mapRunCounts(result.Pipeline),
@@ -53,7 +53,7 @@ func mapRunConfig(cfg config.Config, previewSize int) RunConfigResponse {
 	}
 }
 
-func mapRunCounts(result pipeline.Result) RunCountsResponse {
+func mapRunCounts(result appmatching.Result) RunCountsResponse {
 
 	completionConserved := (result.GeneratedOrders == result.CompletedOrders+result.DeferredOrders)
 	deferredConserved := (result.DeferredOrders == result.DeferredByCapacity+result.DeferredByWindow)
@@ -76,7 +76,7 @@ func mapRunCounts(result pipeline.Result) RunCountsResponse {
 
 }
 
-func mapRunTiming(timing matchrun.Timing) RunTimingResponse {
+func mapRunTiming(timing run.Timing) RunTimingResponse {
 	return RunTimingResponse{
 		RiderGenerationNs:   timing.RiderGeneration.Nanoseconds(),
 		IndexBuildNs:        timing.IndexBuild.Nanoseconds(),
@@ -151,7 +151,7 @@ func mapAssignments(assigns []matching.Assignment) []AssignmentPreviewResponse {
 	return assignsResponse
 }
 
-func mapRunMap(result matchrun.Result) RunMapResponse {
+func mapRunMap(result run.Result) RunMapResponse {
 	return RunMapResponse{
 		Bounds:      mapBounds(result.Bounds),
 		Riders:      mapRiders(result.RiderPreview),
@@ -195,7 +195,7 @@ func mapDeferred(snapShot memory.MemorySnapshot, previewSize int) DeferredRespon
 }
 
 func mapRoundResponse(
-	result matchrun.Result,
+	result run.Result,
 	snapshot memory.MemorySnapshot,
 	previewSize int,
 	round int,

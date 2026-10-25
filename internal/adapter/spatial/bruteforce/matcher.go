@@ -4,13 +4,12 @@ package bruteforce
 import (
 	"errors"
 	"fmt"
+	"ride-sharing/internal/app/report"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
 	"unsafe"
-
-	matchrule "ride-sharing/internal/matcher"
 )
 
 // 整个骑手匹配系统里的“标准答案算法”
@@ -68,9 +67,9 @@ func (m Matcher) TopKInto(order order.Order, limit int, destination []matching.C
 }
 
 // 统计这个 Matcher 的索引占用了多少内存
-func (m Matcher) IndexStats() matchrule.IndexStats {
+func (m Matcher) IndexStats() report.IndexStats {
 	entrySize := uint64(unsafe.Sizeof(rider.Rider{})) // 一个 Rider 结构体占多少字节
-	return matchrule.IndexStats{
+	return report.IndexStats{
 		Kind:           "rider-slice",
 		EntryCount:     len(m.riders),
 		EntrySizeBytes: entrySize,

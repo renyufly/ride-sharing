@@ -1,11 +1,10 @@
-package pipeline
+package matching
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"math"
-	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
@@ -16,7 +15,7 @@ import (
 	"time"
 	"unsafe"
 
-	"ride-sharing/internal/report"
+	"ride-sharing/internal/app/report"
 )
 
 // Strategy B：在“距离尽量近”的前提下，兼顾骑手订单量均衡
@@ -102,7 +101,7 @@ func EstimateBalancedMemory(riderCount int, options BalancedOptions) (BalancedMe
 	if !ok {
 		return BalancedMemoryEstimate{}, errors.New("balanced batch envelope byte estimate overflow")
 	}
-	latencyBytes, ok := multiply(3, uint64(unsafe.Sizeof(latencyHistogram{})))
+	latencyBytes, ok := multiply(3, uint64(unsafe.Sizeof(report.LatencyHistogram{})))
 	if !ok {
 		return BalancedMemoryEstimate{}, errors.New("balanced latency histogram byte estimate overflow")
 	}
@@ -178,17 +177,17 @@ type coordinatorResult struct {
 	maxReorderDepth           int
 	preview                   []matching.Assignment
 	reporter                  *report.Accumulator
-	queueMatchLatency         latencyHistogram
-	endToEndLatency           latencyHistogram
+	queueMatchLatency         report.LatencyHistogram
+	endToEndLatency           report.LatencyHistogram
 	err                       error
 	completedWithinWindow     uint64 // 指定时间窗口内完成分配的订单数量
-	candidateSearchLatency    latencyHistogram
-	assignmentDecisionLatency latencyHistogram
-	algorithmComputeLatency   latencyHistogram
+	candidateSearchLatency    report.LatencyHistogram
+	assignmentDecisionLatency report.LatencyHistogram
+	algorithmComputeLatency   report.LatencyHistogram
 	deferred                  uint64
 	deferredByCapacity        uint64
 	deferredByWindow          uint64
-	deferredPreview           []appmatching.DeferredOrder
+	deferredPreview           []DeferredOrder
 	capacityFiltered          uint64
 }
 
@@ -207,11 +206,11 @@ func (e *CandidatePanicError) Error() string {
 // 实际执行
 func RunBalanced(
 	ctx context.Context,
-	source appmatching.OrderSource,
+	source OrderSource,
 	matcher CandidateMatcher,
 	riders []rider.Rider,
 	options BalancedOptions,
-	deferredSink appmatching.DeferredOrderSink,
+	deferredSink DeferredOrderSink,
 ) (Result, error) {
 	if ctx == nil {
 		return Result{}, errors.New("context cannot be nil")
@@ -318,9 +317,9 @@ func RunBalanced(
 	result.CompletedWithinWindow = coordinatorState.completedWithinWindow
 
 	//
-	candidateSearch := coordinatorState.candidateSearchLatency.summary()
-	assignmentDecision := coordinatorState.assignmentDecisionLatency.summary()
-	algorithmCompute := coordinatorState.algorithmComputeLatency.summary()
+	candidateSearch := coordinatorState.candidateSearchLatency.Summary()
+	assignmentDecision := coordinatorState.assignmentDecisionLatency.Summary()
+	algorithmCompute := coordinatorState.algorithmComputeLatency.Summary()
 
 	result.Performance.AlgorithmPerformanceMetrics.CandidateSearch = candidateSearch
 	result.Performance.AlgorithmPerformanceMetrics.AssignmentDecision = assignmentDecision
@@ -368,7 +367,7 @@ func produceBalanced(
 	ctx context.Context,
 	cancel context.CancelFunc,
 	start time.Time,
-	source appmatching.OrderSource,
+	source OrderSource,
 	batches chan<- *balancedBatch,
 	pool chan *balancedBatch,
 	resultPool chan *candidateResult,
@@ -451,7 +450,7 @@ func produceBalanced(
 				admittedNs := time.Since(start).Nanoseconds()
 				for _, job := range owned.jobs {
 					job.admittedNs = admittedNs
-					state.admissionLatency.observe(admittedNs - job.order.PlannedArrivalNs)
+					state.admissionLatency.Observe(admittedNs - job.order.PlannedArrivalNs)
 				}
 				owned.admittedNs.Store(admittedNs + 1)
 
@@ -598,10 +597,10 @@ func coordinateBalanced(
 	riders []rider.Rider,
 	options BalancedOptions,
 	output chan<- coordinatorResult,
-	deferredSink appmatching.DeferredOrderSink,
+	deferredSink DeferredOrderSink,
 ) {
 	reporter, err := report.New(riders)
-	state := coordinatorResult{preview: make([]matching.Assignment, 0, options.PreviewSize), deferredPreview: make([]appmatching.DeferredOrder, 0, options.PreviewSize), reporter: reporter}
+	state := coordinatorResult{preview: make([]matching.Assignment, 0, options.PreviewSize), deferredPreview: make([]DeferredOrder, 0, options.PreviewSize), reporter: reporter}
 	if err != nil {
 		state.err = fmt.Errorf("create balanced reporter: %w", err)
 		cancel()
@@ -665,7 +664,7 @@ func coordinateBalanced(
 				}
 
 				// 搜索耗时
-				state.candidateSearchLatency.observe(ready.candidateSearchNs)
+				state.candidateSearchLatency.Observe(ready.candidateSearchNs)
 
 				decisionStarted := time.Now() //
 
@@ -673,9 +672,9 @@ func coordinateBalanced(
 					// 超时，不能分配
 					deferredAt := time.Since(start).Nanoseconds()
 
-					deferredOrder := appmatching.DeferredOrder{
+					deferredOrder := DeferredOrder{
 						Order:        ready.order,
-						Reason:       appmatching.DeferredReasonWindowExpired,
+						Reason:       DeferredReasonWindowExpired,
 						DeferredAtNs: deferredAt,
 						Attempt:      options.Attempt,
 					}
@@ -709,11 +708,11 @@ func coordinateBalanced(
 
 				// 执行决策-骑手分配 耗时
 				decisionDuration := time.Since(decisionStarted)
-				state.assignmentDecisionLatency.observe(decisionDuration.Nanoseconds())
+				state.assignmentDecisionLatency.Observe(decisionDuration.Nanoseconds())
 
 				// 每单算法总耗时
 				algorithmComputeNs := decisionDuration.Nanoseconds() + ready.candidateSearchNs
-				state.algorithmComputeLatency.observe(algorithmComputeNs)
+				state.algorithmComputeLatency.Observe(algorithmComputeNs)
 
 				// 累计 selection.capacityFiltered
 				state.capacityFiltered += balancedSelection.capacityFiltered
@@ -722,9 +721,9 @@ func coordinateBalanced(
 					// 全部满额度
 					deferredAt := time.Since(start).Nanoseconds()
 
-					deferredOrder := appmatching.DeferredOrder{
+					deferredOrder := DeferredOrder{
 						Order:        ready.order,
-						Reason:       appmatching.DeferredReasonCapacityExhausted,
+						Reason:       DeferredReasonCapacityExhausted,
 						DeferredAtNs: deferredAt,
 						Attempt:      options.Attempt,
 					}
@@ -741,9 +740,9 @@ func coordinateBalanced(
 					if len(state.deferredPreview) < options.PreviewSize {
 						state.deferredPreview = append(
 							state.deferredPreview,
-							appmatching.DeferredOrder{
+							DeferredOrder{
 								Order:        ready.order,
-								Reason:       appmatching.DeferredReasonCapacityExhausted,
+								Reason:       DeferredReasonCapacityExhausted,
 								DeferredAtNs: deferredAt,
 							},
 						)
@@ -762,8 +761,8 @@ func coordinateBalanced(
 					completedAt := time.Now()
 
 					state.lastCompletionNs = completedAt.Sub(start).Nanoseconds()
-					state.queueMatchLatency.observe(state.lastCompletionNs - ready.admittedNs)
-					state.endToEndLatency.observe(completedAt.Sub(start.Add(time.Duration(ready.order.PlannedArrivalNs))).Nanoseconds())
+					state.queueMatchLatency.Observe(state.lastCompletionNs - ready.admittedNs)
+					state.endToEndLatency.Observe(completedAt.Sub(start.Add(time.Duration(ready.order.PlannedArrivalNs))).Nanoseconds())
 
 					state.completed++ // 已完成分配的订单数量
 

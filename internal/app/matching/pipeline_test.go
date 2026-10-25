@@ -1,4 +1,4 @@
-package pipeline
+package matching
 
 import (
 	"context"
@@ -16,8 +16,8 @@ import (
 
 	"ride-sharing/internal/adapter/simulation"
 	"ride-sharing/internal/adapter/spatial/kdtree"
+	"ride-sharing/internal/app/report"
 	"ride-sharing/internal/domain/geo"
-	"ride-sharing/internal/report"
 )
 
 func TestConcurrentPipelineMatchesSerialKDTree(t *testing.T) {

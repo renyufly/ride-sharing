@@ -20,20 +20,19 @@ import (
 	"errors"
 
 	"ride-sharing/internal/adapter/deferred/file"
+	"ride-sharing/internal/adapter/simulation/runsetup"
+	"ride-sharing/internal/app/report"
 	"ride-sharing/internal/config"
-	matchrule "ride-sharing/internal/matcher"
-	"ride-sharing/internal/pipeline"
-	"ride-sharing/internal/report"
 	"ride-sharing/internal/resource"
 
-	"ride-sharing/internal/matchrun"
+	"ride-sharing/internal/app/run"
 )
 
 // 整个“骑手-订单匹配程序”的总执行
 // 负责把 config → generator → matcher → pipeline → report/resource
 // 这些模块串起来，最后输出一份 JSON 实验报告
 
-// main.go 负责组装系统，真正的并发匹配逻辑在 pipeline.Run() / pipeline.RunBalanced() 里面
+// main.go 负责组装系统，真正的并发匹配逻辑在 appmatching.Run() / appmatching.RunBalanced() 里面
 type startupOutput struct {
 	Phase   string               `json:"phase"`
 	Message string               `json:"message"`
@@ -42,35 +41,35 @@ type startupOutput struct {
 }
 
 type dataOutput struct {
-	Bounds                boundsOutput                     `json:"bounds"`
-	ProjectionOrigin      geoPointOutput                   `json:"projectionOrigin"`
-	EarthRadiusMeters     float64                          `json:"earthRadiusMeters"`
-	RiderSeed             int64                            `json:"riderSeed"`
-	OrderSeed             int64                            `json:"orderSeed"`
-	GeneratedRiderCount   int                              `json:"generatedRiderCount"`
-	GeneratedOrderCount   int                              `json:"generatedOrderCount"`
-	GeneratedWithinWindow int                              `json:"generatedWithinWindow"`
-	AdmittedOrderCount    int                              `json:"admittedOrderCount"`
-	AdmittedWithinWindow  int                              `json:"admittedWithinWindow"`
-	CompletedOrderCount   int                              `json:"completedOrderCount"`
-	CompletedWithinWindow int                              `json:"completedWithinWindow"`
-	UnfinishedOrderCount  int                              `json:"unfinishedOrderCount"`
-	LastPlannedArrivalNs  int64                            `json:"lastPlannedArrivalNs"`
-	MaxQueueDepth         int                              `json:"maxQueueDepthBatches"`
-	WorkerCompleted       []uint64                         `json:"workerCompletedOrders"`
-	GOMAXPROCS            int                              `json:"gomaxprocs"`
-	MemoryEstimate        *pipeline.MemoryEstimate         `json:"memoryEstimate,omitempty"`
-	BalancedMemory        *pipeline.BalancedMemoryEstimate `json:"balancedMemoryEstimate,omitempty"`
-	Index                 matchrule.IndexStats             `json:"index"`
-	Timing                timingOutput                     `json:"timing"`
-	Performance           pipeline.PerformanceMetrics      `json:"performance"`
-	Resources             resource.Stats                   `json:"resources"`
-	RiderPreview          []riderOutput                    `json:"riderPreview"`
-	OrderPreview          []orderOutput                    `json:"orderPreview"`
-	AssignmentPreview     []assignmentOutput               `json:"assignmentPreview"`
-	Report                report.Summary                   `json:"report"`
-	StrategyDetails       *pipeline.StrategyMetrics        `json:"strategyDetails,omitempty"`
-	ReadableSummary       readableSummary                  `json:"readableSummary"`
+	Bounds                boundsOutput                        `json:"bounds"`
+	ProjectionOrigin      geoPointOutput                      `json:"projectionOrigin"`
+	EarthRadiusMeters     float64                             `json:"earthRadiusMeters"`
+	RiderSeed             int64                               `json:"riderSeed"`
+	OrderSeed             int64                               `json:"orderSeed"`
+	GeneratedRiderCount   int                                 `json:"generatedRiderCount"`
+	GeneratedOrderCount   int                                 `json:"generatedOrderCount"`
+	GeneratedWithinWindow int                                 `json:"generatedWithinWindow"`
+	AdmittedOrderCount    int                                 `json:"admittedOrderCount"`
+	AdmittedWithinWindow  int                                 `json:"admittedWithinWindow"`
+	CompletedOrderCount   int                                 `json:"completedOrderCount"`
+	CompletedWithinWindow int                                 `json:"completedWithinWindow"`
+	UnfinishedOrderCount  int                                 `json:"unfinishedOrderCount"`
+	LastPlannedArrivalNs  int64                               `json:"lastPlannedArrivalNs"`
+	MaxQueueDepth         int                                 `json:"maxQueueDepthBatches"`
+	WorkerCompleted       []uint64                            `json:"workerCompletedOrders"`
+	GOMAXPROCS            int                                 `json:"gomaxprocs"`
+	MemoryEstimate        *appmatching.MemoryEstimate         `json:"memoryEstimate,omitempty"`
+	BalancedMemory        *appmatching.BalancedMemoryEstimate `json:"balancedMemoryEstimate,omitempty"`
+	Index                 report.IndexStats                   `json:"index"`
+	Timing                timingOutput                        `json:"timing"`
+	Performance           appmatching.PerformanceMetrics      `json:"performance"`
+	Resources             resource.Stats                      `json:"resources"`
+	RiderPreview          []riderOutput                       `json:"riderPreview"`
+	OrderPreview          []orderOutput                       `json:"orderPreview"`
+	AssignmentPreview     []assignmentOutput                  `json:"assignmentPreview"`
+	Report                report.Summary                      `json:"report"`
+	StrategyDetails       *appmatching.StrategyMetrics        `json:"strategyDetails,omitempty"`
+	ReadableSummary       readableSummary                     `json:"readableSummary"`
 }
 
 type boundsOutput struct {
@@ -115,7 +114,7 @@ type assignmentOutput struct {
 // type nearestMatcher interface {
 // 	Match(order.Order) (matching.Assignment, error)
 // 	TopKInto(order.Order, int, []matching.Candidate) ([]matching.Candidate, error)
-// 	IndexStats() matchrule.IndexStats
+// 	IndexStats() report.IndexStats
 // }
 
 type timingOutput struct {
@@ -168,13 +167,13 @@ func main() {
 
 	previewSize := 3
 
-	request := matchrun.Request{
+	request := run.Request{
 		Config:       cfg,
 		PreviewSize:  previewSize,
 		DeferredSink: deferredOrderSink,
 	}
 
-	runResult, runErr := matchrun.Run(runContext, request)
+	runResult, runErr := run.Run(runContext, request, runsetup.Factory{})
 
 	if fileSink != nil {
 		closeErr := fileSink.Close()

@@ -1,4 +1,4 @@
-package pipeline
+package matching
 
 import (
 	"context"
@@ -31,8 +31,8 @@ func TestBalancedCoordinatorUsesLoadThenDistanceThenUID(t *testing.T) {
 	}
 	result, err := RunBalanced(context.Background(), &sliceSource{orders: orders}, matcher, riders, BalancedOptions{
 		Options: Options{Workers: 2, BatchSize: 1, ChannelCapacity: 2, ExpectedOrders: 3, PreviewSize: 3},
-		TopK:    2, MaxExtraDistanceMeters: 20,
-	})
+		TopK:    2, MaxExtraDistanceMeters: 20, Attempt: 1,
+	}, discardDeferredSink{})
 	if err != nil {
 		t.Fatalf("RunBalanced() error = %v", err)
 	}
@@ -56,8 +56,8 @@ func TestBalancedRespectsMaximumExtraDistance(t *testing.T) {
 	}
 	result, err := RunBalanced(context.Background(), newSliceSource(10), matcher, riders, BalancedOptions{
 		Options: Options{Workers: 2, BatchSize: 1, ChannelCapacity: 2, ExpectedOrders: 10, PreviewSize: 10},
-		TopK:    2, MaxExtraDistanceMeters: 10,
-	})
+		TopK:    2, MaxExtraDistanceMeters: 10, Attempt: 1,
+	}, discardDeferredSink{})
 	if err != nil {
 		t.Fatalf("RunBalanced() error = %v", err)
 	}
@@ -84,14 +84,14 @@ func TestBalancedReordersCandidateResultsDeterministically(t *testing.T) {
 	}
 	options := BalancedOptions{
 		Options: Options{Workers: 4, BatchSize: 1, ChannelCapacity: 4, ExpectedOrders: uint64(len(orders)), PreviewSize: len(orders)},
-		TopK:    3, MaxExtraDistanceMeters: 10,
+		TopK:    3, MaxExtraDistanceMeters: 10, Attempt: 1,
 	}
 
-	first, err := RunBalanced(context.Background(), &sliceSource{orders: append([]order.Order(nil), orders...)}, delayedCandidateMatcher{matcher: base}, riders, options)
+	first, err := RunBalanced(context.Background(), &sliceSource{orders: append([]order.Order(nil), orders...)}, delayedCandidateMatcher{matcher: base}, riders, options, discardDeferredSink{})
 	if err != nil {
 		t.Fatalf("first RunBalanced() error = %v", err)
 	}
-	second, err := RunBalanced(context.Background(), &sliceSource{orders: append([]order.Order(nil), orders...)}, delayedCandidateMatcher{matcher: base}, riders, options)
+	second, err := RunBalanced(context.Background(), &sliceSource{orders: append([]order.Order(nil), orders...)}, delayedCandidateMatcher{matcher: base}, riders, options, discardDeferredSink{})
 	if err != nil {
 		t.Fatalf("second RunBalanced() error = %v", err)
 	}
@@ -113,8 +113,8 @@ func TestBalancedLargeBatchesCannotStarveNextSequence(t *testing.T) {
 	defer cancel()
 	result, err := RunBalanced(ctx, stream, matcher, riders, BalancedOptions{
 		Options: Options{Workers: 2, BatchSize: 256, ChannelCapacity: 16, ExpectedOrders: 100_000},
-		TopK:    8, MaxExtraDistanceMeters: 300,
-	})
+		TopK:    8, MaxExtraDistanceMeters: 300, Attempt: 1,
+	}, discardDeferredSink{})
 	if err != nil {
 		t.Fatalf("RunBalanced() error = %v", err)
 	}
@@ -138,8 +138,8 @@ func TestBalancedRunDoesNotChangeNearestStrategy(t *testing.T) {
 
 	balancedStream, _ := orders.NewStream(dataGenerator, 10_000, 0, "unbounded", "uniform")
 	if _, err := RunBalanced(context.Background(), balancedStream, matcher, riders, BalancedOptions{
-		Options: nearestOptions, TopK: 8, MaxExtraDistanceMeters: 300,
-	}); err != nil {
+		Options: nearestOptions, TopK: 8, MaxExtraDistanceMeters: 300, Attempt: 1,
+	}, discardDeferredSink{}); err != nil {
 		t.Fatalf("balanced run error = %v", err)
 	}
 
@@ -164,8 +164,8 @@ func TestBalancedCancellationStopsAllStages(t *testing.T) {
 	started := time.Now()
 	result, err := RunBalanced(ctx, newSliceSource(1_000), slowCandidateMatcher{matcher: base, delay: 2 * time.Millisecond}, riders, BalancedOptions{
 		Options: Options{Workers: 2, BatchSize: 1, ChannelCapacity: 2, ExpectedOrders: 1_000},
-		TopK:    1,
-	})
+		TopK:    1, Attempt: 1,
+	}, discardDeferredSink{})
 	if err == nil || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("RunBalanced() error = %v, want deadline exceeded", err)
 	}
@@ -181,8 +181,8 @@ func TestBalancedCandidatePanicIsReported(t *testing.T) {
 	riders := []rider.Rider{{UID: 1}}
 	result, err := RunBalanced(context.Background(), newSliceSource(20), panicCandidateMatcher{panicSequence: 5}, riders, BalancedOptions{
 		Options: Options{Workers: 2, BatchSize: 1, ChannelCapacity: 2, ExpectedOrders: 20},
-		TopK:    1,
-	})
+		TopK:    1, Attempt: 1,
+	}, discardDeferredSink{})
 	if err == nil {
 		t.Fatal("RunBalanced() error = nil, want candidate panic")
 	}
@@ -195,6 +195,10 @@ func TestBalancedCandidatePanicIsReported(t *testing.T) {
 type delayedCandidateMatcher struct {
 	matcher kdtree.Matcher
 }
+
+type discardDeferredSink struct{}
+
+func (discardDeferredSink) Store(context.Context, DeferredOrder) error { return nil }
 
 type slowCandidateMatcher struct {
 	matcher kdtree.Matcher

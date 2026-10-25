@@ -1,4 +1,4 @@
-package pipeline
+package matching
 
 import (
 	"errors"
@@ -6,7 +6,7 @@ import (
 	"ride-sharing/internal/domain/rider"
 	"unsafe"
 
-	"ride-sharing/internal/report"
+	"ride-sharing/internal/app/report"
 )
 
 // MemoryEstimate describes allocations whose size is fixed by riders,
@@ -60,7 +60,7 @@ func EstimateMemory(riderCount int, options Options) (MemoryEstimate, error) {
 	if !ok {
 		return MemoryEstimate{}, errors.New("order buffer byte estimate overflow")
 	}
-	latencyHistogramBytes, ok := multiply(uint64(1+2*options.Workers), uint64(unsafe.Sizeof(latencyHistogram{})))
+	latencyHistogramBytes, ok := multiply(uint64(1+2*options.Workers), uint64(unsafe.Sizeof(report.LatencyHistogram{})))
 	if !ok {
 		return MemoryEstimate{}, errors.New("latency histogram byte estimate overflow")
 	}
