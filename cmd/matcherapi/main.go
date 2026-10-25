@@ -13,6 +13,7 @@ import (
 	"time"
 )
 
+// HTTP 入口
 // 只负责服务启动和依赖装配
 
 var (

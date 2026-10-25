@@ -28,6 +28,8 @@ import (
 	"ride-sharing/internal/app/run"
 )
 
+// CLI 入口
+
 // 整个“骑手-订单匹配程序”的总执行
 // 负责把 config → generator → matcher → pipeline → report/resource
 // 这些模块串起来，最后输出一份 JSON 实验报告
