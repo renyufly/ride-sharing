@@ -1,13 +1,10 @@
 package main
 
 import (
-	"ride-sharing/internal/adapter/simulation/orders"
 	"ride-sharing/internal/platform/config"
 	"strings"
 	"testing"
 	"time"
-
-	"ride-sharing/internal/adapter/simulation"
 )
 
 func TestParseDefaults(t *testing.T) {
@@ -49,7 +46,7 @@ func TestParseOverrides(t *testing.T) {
 	if cfg.RiderCount != 12 || cfg.OrderCount != 34 || cfg.ArrivalWindow != 5*time.Second || cfg.RunTimeout != time.Minute || cfg.MonitorInterval != 25*time.Millisecond || cfg.Seed != 99 {
 		t.Fatalf("parseConfig() basic overrides = %#v", cfg)
 	}
-	if cfg.ArrivalModel != orders.ArrivalFrontLoadedBurst || cfg.RiderDistribution != simulation.DistributionSkewed || cfg.OrderDistribution != simulation.DistributionHotspot {
+	if cfg.ArrivalModel != config.ArrivalFrontLoadedBurst || cfg.RiderDistribution != config.DistributionSkewed || cfg.OrderDistribution != config.DistributionHotspot {
 		t.Fatalf("parseConfig() generator overrides = %#v", cfg)
 	}
 	if cfg.Algorithm != config.AlgorithmKDTree || cfg.Workers != 2 || cfg.BatchSize != 16 || cfg.ChannelCapacity != 4 {

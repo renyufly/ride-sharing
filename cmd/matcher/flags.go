@@ -4,8 +4,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"ride-sharing/internal/adapter/simulation"
-	"ride-sharing/internal/adapter/simulation/orders"
 	"ride-sharing/internal/platform/config"
 )
 
@@ -58,9 +56,9 @@ func parseConfig(args []string) (config.Config, error) {
 	}
 
 	cfg.Algorithm = config.Algorithm(algorithm)
-	cfg.ArrivalModel = orders.ArrivalModel(arrivalModel)
-	cfg.RiderDistribution = simulation.SpatialDistribution(riderDistribution)
-	cfg.OrderDistribution = simulation.SpatialDistribution(orderDistribution)
+	cfg.ArrivalModel = config.ArrivalModel(arrivalModel)
+	cfg.RiderDistribution = config.SpatialDistribution(riderDistribution)
+	cfg.OrderDistribution = config.SpatialDistribution(orderDistribution)
 	cfg.Strategy = config.Strategy(strategy)
 	if err := cfg.Validate(); err != nil {
 		return config.Config{}, err

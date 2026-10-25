@@ -8,33 +8,24 @@ import (
 	"ride-sharing/internal/adapter/simulation"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/order"
+	"ride-sharing/internal/platform/config"
 	"time"
-)
-
-type ArrivalModel string // 订单什么时候到
-// uniform-window 均匀到达：订单均匀铺在整个 30 秒窗口
-// front-loaded-burst 前置突发流量：前 20% 时间到达 80% 的订单
-// unbounded 所有订单都可以立即进入系统 (测系统纯粹的最大吞吐能力, 不模拟真实到达时间)
-const (
-	ArrivalUniformWindow    ArrivalModel = "uniform-window"
-	ArrivalFrontLoadedBurst ArrivalModel = "front-loaded-burst"
-	ArrivalUnbounded        ArrivalModel = "unbounded"
 )
 
 // NewOrderStream returns a fresh replayable stream. Calling it again with the
 // same arguments restarts the exact order sequence from Sequence 0.
 // Streaming Generation（流式生成）
-func NewStream(scenario simulation.Scenario, count int, window time.Duration, arrival ArrivalModel, distribution simulation.SpatialDistribution) (*OrderStream, error) {
+func NewStream(scenario simulation.Scenario, count int, window time.Duration, arrival config.ArrivalModel, distribution config.SpatialDistribution) (*OrderStream, error) {
 	if count <= 0 {
 		return nil, errors.New("order count must be greater than zero")
 	}
 	if window < 0 {
 		return nil, errors.New("arrival window cannot be negative")
 	}
-	if err := ValidateArrivalModel(arrival); err != nil {
+	if err := config.ValidateArrivalModel(arrival); err != nil {
 		return nil, err
 	}
-	if err := simulation.ValidateSpatialDistribution(distribution); err != nil {
+	if err := config.ValidateSpatialDistribution(distribution); err != nil {
 		return nil, err
 	}
 
@@ -55,8 +46,8 @@ type OrderStream struct {
 	nextSequence uint64
 	total        uint64
 	window       time.Duration
-	arrival      ArrivalModel
-	distribution simulation.SpatialDistribution
+	arrival      config.ArrivalModel
+	distribution config.SpatialDistribution
 	bounds       geo.BoundingBox
 	projector    geo.Projector
 	orderSeed    int64
@@ -110,17 +101,17 @@ func (s *OrderStream) Next() (order.Order, bool, error) {
 // 根据“当前是第几个订单”、订单总数、总到达时间窗口以及到达模型，计算这个订单应该在程序启动后的第多久出现
 // sequence-当前订单编号 total-总订单数量 window-所有订单计划到达的总时间窗口
 // 返回值-当前订单相对于开始时刻的计划到达时间
-func plannedArrival(sequence, total uint64, window time.Duration, arrival ArrivalModel) time.Duration {
-	if arrival == ArrivalUnbounded || total <= 1 || window == 0 {
+func plannedArrival(sequence, total uint64, window time.Duration, arrival config.ArrivalModel) time.Duration {
+	if arrival == config.ArrivalUnbounded || total <= 1 || window == 0 {
 		// unbounded：所有订单立即生产，计划时间为0
 		return 0
 	}
 
 	switch arrival {
-	case ArrivalUniformWindow:
+	case config.ArrivalUniformWindow:
 		return uniformArrival(sequence, total, window)
 
-	case ArrivalFrontLoadedBurst:
+	case config.ArrivalFrontLoadedBurst:
 		return burstArrival(sequence, total, window)
 
 	default:
@@ -177,13 +168,4 @@ func slotOffset(index, count uint64, duration time.Duration) time.Duration {
 	remainder := uint64(duration) % count
 	offset := uint64(duration)/count*index + uint64(index*remainder/count)
 	return time.Duration(offset)
-}
-
-func ValidateArrivalModel(arrival ArrivalModel) error {
-	switch arrival {
-	case ArrivalUniformWindow, ArrivalFrontLoadedBurst, ArrivalUnbounded:
-		return nil
-	default:
-		return fmt.Errorf("unsupported arrival model %q", arrival)
-	}
 }

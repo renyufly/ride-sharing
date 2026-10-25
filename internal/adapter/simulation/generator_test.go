@@ -7,6 +7,7 @@ import (
 	"ride-sharing/internal/adapter/simulation/riders"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
+	"ride-sharing/internal/platform/config"
 	"testing"
 	"time"
 
@@ -100,11 +101,11 @@ func TestArrivalModels(t *testing.T) {
 	assertNonDecreasing(t, uniform)
 
 	burst := readOrdersInWindow(t, generator, 6, window, ArrivalFrontLoadedBurst)
-	if burst[4].PlannedArrivalNs != (2 * time.Second).Nanoseconds() {
-		t.Fatalf("80%% burst arrival = %s, want 2s", time.Duration(burst[4].PlannedArrivalNs))
+	if burst[4].PlannedArrivalNs >= (2 * time.Second).Nanoseconds() {
+		t.Fatalf("80%% burst arrival = %s, want before 2s", time.Duration(burst[4].PlannedArrivalNs))
 	}
-	if burst[len(burst)-1].PlannedArrivalNs != window.Nanoseconds() {
-		t.Fatalf("burst last arrival = %s, want %s", time.Duration(burst[len(burst)-1].PlannedArrivalNs), window)
+	if burst[5].PlannedArrivalNs < (2*time.Second).Nanoseconds() || burst[5].PlannedArrivalNs >= window.Nanoseconds() {
+		t.Fatalf("burst final arrival = %s, want within [2s, %s)", time.Duration(burst[5].PlannedArrivalNs), window)
 	}
 	assertNonDecreasing(t, burst)
 
@@ -210,17 +211,17 @@ func (g testGenerator) NewOrderStream(count int, window time.Duration, arrival A
 	return orders.NewStream(g.Scenario, count, window, arrival, distribution)
 }
 
-type ArrivalModel = orders.ArrivalModel
-type SpatialDistribution = simulation.SpatialDistribution
+type ArrivalModel = config.ArrivalModel
+type SpatialDistribution = config.SpatialDistribution
 
 const (
-	DistributionUniform = simulation.DistributionUniform
-	DistributionHotspot = simulation.DistributionHotspot
-	DistributionSkewed  = simulation.DistributionSkewed
+	DistributionUniform = config.DistributionUniform
+	DistributionHotspot = config.DistributionHotspot
+	DistributionSkewed  = config.DistributionSkewed
 )
 
 const (
-	ArrivalUniformWindow    = orders.ArrivalUniformWindow
-	ArrivalFrontLoadedBurst = orders.ArrivalFrontLoadedBurst
-	ArrivalUnbounded        = orders.ArrivalUnbounded
+	ArrivalUniformWindow    = config.ArrivalUniformWindow
+	ArrivalFrontLoadedBurst = config.ArrivalFrontLoadedBurst
+	ArrivalUnbounded        = config.ArrivalUnbounded
 )

@@ -6,6 +6,7 @@ import (
 	"ride-sharing/internal/adapter/simulation/riders"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
+	"ride-sharing/internal/platform/config"
 	"testing"
 	"time"
 
@@ -139,12 +140,12 @@ func TestRequiredCorrectnessScales(t *testing.T) {
 			if err != nil {
 				t.Fatalf("simulation.New() error = %v", err)
 			}
-			riders, err := riders.Generate(dataGenerator, test.riderCount, simulation.DistributionUniform)
+			riders, err := riders.Generate(dataGenerator, test.riderCount, config.DistributionUniform)
 			if err != nil {
 				t.Fatalf("GenerateRiders() error = %v", err)
 			}
 			matcher := mustMatcher(t, riders)
-			stream, err := orders.NewStream(dataGenerator, test.orderCount, 30*time.Second, orders.ArrivalUniformWindow, simulation.DistributionUniform)
+			stream, err := orders.NewStream(dataGenerator, test.orderCount, 30*time.Second, config.ArrivalUniformWindow, config.DistributionUniform)
 			if err != nil {
 				t.Fatalf("NewOrderStream() error = %v", err)
 			}

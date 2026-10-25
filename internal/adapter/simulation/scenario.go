@@ -4,16 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"ride-sharing/internal/domain/geo"
-)
-
-type SpatialDistribution string // 骑手/订单在哪里
-// Uniform：完全随机分布
-// Hotspot：热点区域 (很符合网约车场景)
-// Skewed：偏斜分布 (极端不均衡的地理分布)
-const (
-	DistributionUniform SpatialDistribution = "uniform"
-	DistributionHotspot SpatialDistribution = "hotspot"
-	DistributionSkewed  SpatialDistribution = "skewed"
+	"ride-sharing/internal/platform/config"
 )
 
 // 预先定义三个热点 (地图内部的相对位置)
@@ -70,22 +61,13 @@ func (g Scenario) Seeds() Seeds {
 
 func (g Scenario) Projector() geo.Projector { return g.projector }
 
-func ValidateSpatialDistribution(distribution SpatialDistribution) error {
-	switch distribution {
-	case DistributionUniform, DistributionHotspot, DistributionSkewed:
-		return nil
-	default:
-		return fmt.Errorf("unsupported spatial distribution %q", distribution)
-	}
-}
-
-func SamplePoint(random *rand.Rand, bounds geo.BoundingBox, distribution SpatialDistribution) geo.GeoPoint {
+func SamplePoint(random *rand.Rand, bounds geo.BoundingBox, distribution config.SpatialDistribution) geo.GeoPoint {
 	latitudeSpan := bounds.MaxLatitude - bounds.MinLatitude
 	longitudeSpan := bounds.MaxLongitude - bounds.MinLongitude
 
 	var latitudeRatio, longitudeRatio float64
 	switch distribution {
-	case DistributionHotspot:
+	case config.DistributionHotspot:
 		// 85% 的点出现在热点附近
 		if random.Float64() < 0.85 {
 			center := hotspotCenters[random.Intn(len(hotspotCenters))]
@@ -95,7 +77,7 @@ func SamplePoint(random *rand.Rand, bounds geo.BoundingBox, distribution Spatial
 			latitudeRatio = random.Float64()
 			longitudeRatio = random.Float64()
 		}
-	case DistributionSkewed:
+	case config.DistributionSkewed:
 		latitudeRatio = cube(random.Float64())
 		longitudeRatio = cube(random.Float64())
 	default:

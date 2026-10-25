@@ -2,8 +2,6 @@ package run
 
 import (
 	"fmt"
-	"ride-sharing/internal/adapter/simulation"
-	"ride-sharing/internal/adapter/simulation/orders"
 	apprun "ride-sharing/internal/app/run"
 	"ride-sharing/internal/platform/config"
 	"time"
@@ -77,9 +75,9 @@ func (r Request) toRunRequest() (apprun.Request, error) {
 
 	cfg.Algorithm = config.Algorithm(r.Algorithm)
 	cfg.Strategy = config.Strategy(r.Strategy)
-	cfg.ArrivalModel = orders.ArrivalModel(r.ArrivalModel)
-	cfg.OrderDistribution = simulation.SpatialDistribution(r.OrderDistribution)
-	cfg.RiderDistribution = simulation.SpatialDistribution(r.RiderDistribution)
+	cfg.ArrivalModel = config.ArrivalModel(r.ArrivalModel)
+	cfg.OrderDistribution = config.SpatialDistribution(r.OrderDistribution)
+	cfg.RiderDistribution = config.SpatialDistribution(r.RiderDistribution)
 
 	if err := cfg.Validate(); err != nil {
 		return apprun.Request{}, fmt.Errorf("validate matcher request: %w", err)

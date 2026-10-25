@@ -9,6 +9,7 @@ import (
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
+	"ride-sharing/internal/platform/config"
 	"strings"
 	"sync"
 	"testing"
@@ -24,7 +25,7 @@ func TestConcurrentPipelineMatchesSerialKDTree(t *testing.T) {
 	const orderCount = 10_000
 	dataGenerator, riders, matcher := testData(t, 100)
 	wrapper := &trackingMatcher{matcher: matcher, seen: make([]uint8, orderCount)}
-	stream, err := orders.NewStream(dataGenerator, orderCount, 0, orders.ArrivalUnbounded, simulation.DistributionUniform)
+	stream, err := orders.NewStream(dataGenerator, orderCount, 0, config.ArrivalUnbounded, config.DistributionUniform)
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}
@@ -60,7 +61,7 @@ func TestConcurrentPipelineMatchesSerialKDTree(t *testing.T) {
 func TestBoundedQueueAppliesBackpressureWithoutDropping(t *testing.T) {
 	const orderCount = 40
 	dataGenerator, riders, matcher := testData(t, 10)
-	stream, err := orders.NewStream(dataGenerator, orderCount, 0, orders.ArrivalUnbounded, simulation.DistributionUniform)
+	stream, err := orders.NewStream(dataGenerator, orderCount, 0, config.ArrivalUnbounded, config.DistributionUniform)
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}
@@ -83,7 +84,7 @@ func TestBoundedQueueAppliesBackpressureWithoutDropping(t *testing.T) {
 func TestCancellationReturnsPartialCountsAndStops(t *testing.T) {
 	const orderCount = 1_000
 	dataGenerator, riders, matcher := testData(t, 10)
-	stream, err := orders.NewStream(dataGenerator, orderCount, 0, orders.ArrivalUnbounded, simulation.DistributionUniform)
+	stream, err := orders.NewStream(dataGenerator, orderCount, 0, config.ArrivalUnbounded, config.DistributionUniform)
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}
@@ -330,7 +331,7 @@ func testData(t *testing.T, riderCount int) (simulation.Scenario, []rider.Rider,
 	if err != nil {
 		t.Fatalf("simulation.New() error = %v", err)
 	}
-	riders, err := riders.Generate(dataGenerator, riderCount, simulation.DistributionUniform)
+	riders, err := riders.Generate(dataGenerator, riderCount, config.DistributionUniform)
 	if err != nil {
 		t.Fatalf("GenerateRiders() error = %v", err)
 	}
@@ -343,7 +344,7 @@ func testData(t *testing.T, riderCount int) (simulation.Scenario, []rider.Rider,
 
 func serialSummary(t *testing.T, dataGenerator simulation.Scenario, matcher Matcher, riders []rider.Rider, orderCount int) report.Summary {
 	t.Helper()
-	stream, err := orders.NewStream(dataGenerator, orderCount, 0, orders.ArrivalUnbounded, simulation.DistributionUniform)
+	stream, err := orders.NewStream(dataGenerator, orderCount, 0, config.ArrivalUnbounded, config.DistributionUniform)
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}

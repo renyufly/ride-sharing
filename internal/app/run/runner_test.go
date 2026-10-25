@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"ride-sharing/internal/adapter/deferred/memory"
-	"ride-sharing/internal/adapter/simulation/orders"
 	"ride-sharing/internal/adapter/simulation/runsetup"
 	"ride-sharing/internal/app/run"
 	"ride-sharing/internal/platform/config"
@@ -17,7 +16,7 @@ func TestRunKeepsNearestAndBalancedAssignmentCounts(t *testing.T) {
 	cfg.RiderCount = 2
 	cfg.OrderCount = 5
 	cfg.ArrivalWindow = time.Second
-	cfg.ArrivalModel = orders.ArrivalUnbounded
+	cfg.ArrivalModel = config.ArrivalUnbounded
 	result, err := run.Run(context.Background(), run.Request{Config: cfg, PreviewSize: 5}, runsetup.Factory{})
 	if err != nil {
 		t.Fatal(err)

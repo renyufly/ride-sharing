@@ -5,10 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"ride-sharing/internal/adapter/simulation/orders"
 	"time"
-
-	"ride-sharing/internal/adapter/simulation"
 )
 
 // errors      创建/合并错误
@@ -17,7 +14,7 @@ import (
 // io          这里用于丢弃 flag 默认输出
 // math        检查 NaN、Inf
 // time        时间类型
-// generator   使用订单到达模型、空间分布模型
+// 到达模型和空间分布选项由配置包统一定义，供模拟适配器使用
 
 // 整个骑手匹配程序的“控制面板 + 参数检查器”
 // 这次测试跑多少骑手、多少订单、订单多久到达、用什么算法、
@@ -44,19 +41,55 @@ const (
 	StrategyBalanced Strategy = "balanced"
 )
 
+// ArrivalModel and SpatialDistribution describe the simulation options accepted
+// by the runtime configuration. Adapters consume these values from config.
+type ArrivalModel string
+
+const (
+	ArrivalUniformWindow    ArrivalModel = "uniform-window"
+	ArrivalFrontLoadedBurst ArrivalModel = "front-loaded-burst"
+	ArrivalUnbounded        ArrivalModel = "unbounded"
+)
+
+func ValidateArrivalModel(arrival ArrivalModel) error {
+	switch arrival {
+	case ArrivalUniformWindow, ArrivalFrontLoadedBurst, ArrivalUnbounded:
+		return nil
+	default:
+		return fmt.Errorf("unsupported arrival model %q", arrival)
+	}
+}
+
+type SpatialDistribution string
+
+const (
+	DistributionUniform SpatialDistribution = "uniform"
+	DistributionHotspot SpatialDistribution = "hotspot"
+	DistributionSkewed  SpatialDistribution = "skewed"
+)
+
+func ValidateSpatialDistribution(distribution SpatialDistribution) error {
+	switch distribution {
+	case DistributionUniform, DistributionHotspot, DistributionSkewed:
+		return nil
+	default:
+		return fmt.Errorf("unsupported spatial distribution %q", distribution)
+	}
+}
+
 // Config contains the complete runtime surface. TopK and
 // MaxExtraDistanceMeters are explicit strategy B controls; validation rejects
 // them for the default nearest-rider strategy.
 type Config struct { // 一次 benchmark 的完整配置
-	RiderCount             int                            // 骑手/司机 数量
-	OrderCount             int                            // 订单数量
-	ArrivalWindow          time.Duration                  // 订单在多久内到达
-	RunTimeout             time.Duration                  // 整个测试最大运行时间
-	MonitorInterval        time.Duration                  // 多久采样一次资源使用
-	ArrivalModel           orders.ArrivalModel            // uniform-window-订单均匀进入，front-loaded-burst-大量订单集中在开始阶段，unbounded-不按照固定 arrival window 节流
-	Seed                   int64                          // 随机数种子
-	RiderDistribution      simulation.SpatialDistribution // 骑手怎么分布：uniform-均匀分布，hotspot-大量订单集中在热点区域
-	OrderDistribution      simulation.SpatialDistribution
+	RiderCount             int                 // 骑手/司机 数量
+	OrderCount             int                 // 订单数量
+	ArrivalWindow          time.Duration       // 订单在多久内到达
+	RunTimeout             time.Duration       // 整个测试最大运行时间
+	MonitorInterval        time.Duration       // 多久采样一次资源使用
+	ArrivalModel           ArrivalModel        // uniform-window-订单均匀进入，front-loaded-burst-大量订单集中在开始阶段，unbounded-不按照固定 arrival window 节流
+	Seed                   int64               // 随机数种子
+	RiderDistribution      SpatialDistribution // 骑手怎么分布：uniform-均匀分布，hotspot-大量订单集中在热点区域
+	OrderDistribution      SpatialDistribution
 	Algorithm              Algorithm // brute-force / KD-tree
 	Workers                int       // worker goroutine 数量
 	BatchSize              int       // 每批多少订单
@@ -110,10 +143,10 @@ func Default() Config {
 		ArrivalWindow:     30 * time.Second,
 		RunTimeout:        0,
 		MonitorInterval:   100 * time.Millisecond,
-		ArrivalModel:      orders.ArrivalUniformWindow,
+		ArrivalModel:      ArrivalUniformWindow,
 		Seed:              42,
-		RiderDistribution: simulation.DistributionUniform,
-		OrderDistribution: simulation.DistributionUniform,
+		RiderDistribution: DistributionUniform,
+		OrderDistribution: DistributionUniform,
 		Algorithm:         AlgorithmKDTree,
 		Workers:           2,
 		BatchSize:         1,
@@ -141,13 +174,13 @@ func (c Config) Validate() error {
 	if c.MonitorInterval <= 0 {
 		errs = append(errs, errors.New("monitor interval must be greater than zero"))
 	}
-	if err := orders.ValidateArrivalModel(c.ArrivalModel); err != nil {
+	if err := ValidateArrivalModel(c.ArrivalModel); err != nil {
 		errs = append(errs, err)
 	}
-	if err := simulation.ValidateSpatialDistribution(c.RiderDistribution); err != nil {
+	if err := ValidateSpatialDistribution(c.RiderDistribution); err != nil {
 		errs = append(errs, fmt.Errorf("rider distribution: %w", err))
 	}
-	if err := simulation.ValidateSpatialDistribution(c.OrderDistribution); err != nil {
+	if err := ValidateSpatialDistribution(c.OrderDistribution); err != nil {
 		errs = append(errs, fmt.Errorf("order distribution: %w", err))
 	}
 	if c.Algorithm != AlgorithmBruteForce && c.Algorithm != AlgorithmKDTree {

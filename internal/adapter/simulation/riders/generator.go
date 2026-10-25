@@ -6,14 +6,15 @@ import (
 	"math/rand"
 	"ride-sharing/internal/adapter/simulation"
 	"ride-sharing/internal/domain/rider"
+	"ride-sharing/internal/platform/config"
 )
 
 // 一次生成所有骑手
-func Generate(scenario simulation.Scenario, count int, distribution simulation.SpatialDistribution) ([]rider.Rider, error) {
+func Generate(scenario simulation.Scenario, count int, distribution config.SpatialDistribution) ([]rider.Rider, error) {
 	if count <= 0 {
 		return nil, errors.New("rider count must be greater than zero")
 	}
-	if err := simulation.ValidateSpatialDistribution(distribution); err != nil {
+	if err := config.ValidateSpatialDistribution(distribution); err != nil {
 		return nil, err
 	}
 

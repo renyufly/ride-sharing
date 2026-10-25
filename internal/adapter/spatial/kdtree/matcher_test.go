@@ -7,6 +7,7 @@ import (
 	"ride-sharing/internal/adapter/simulation/riders"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
+	"ride-sharing/internal/platform/config"
 	"testing"
 	"time"
 
@@ -75,10 +76,10 @@ func TestDuplicateCoordinatesAndDegenerateDistribution(t *testing.T) {
 }
 
 func TestMatchesBruteForceForGeneratedScenarios(t *testing.T) {
-	distributions := []simulation.SpatialDistribution{
-		simulation.DistributionUniform,
-		simulation.DistributionHotspot,
-		simulation.DistributionSkewed,
+	distributions := []config.SpatialDistribution{
+		config.DistributionUniform,
+		config.DistributionHotspot,
+		config.DistributionSkewed,
 	}
 	for _, riderDistribution := range distributions {
 		for _, orderDistribution := range distributions {
@@ -91,7 +92,7 @@ func TestMatchesBruteForceForGeneratedScenarios(t *testing.T) {
 }
 
 func TestMatchesBruteForceAtRequiredBaselineScale(t *testing.T) {
-	compareGeneratedMatchers(t, 100, 10_000, simulation.DistributionUniform, simulation.DistributionUniform)
+	compareGeneratedMatchers(t, 100, 10_000, config.DistributionUniform, config.DistributionUniform)
 }
 
 func TestTopKMatchesBruteForceAndIsStable(t *testing.T) {
@@ -99,7 +100,7 @@ func TestTopKMatchesBruteForceAndIsStable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("simulation.New() error = %v", err)
 	}
-	riders, err := riders.Generate(dataGenerator, 127, simulation.DistributionHotspot)
+	riders, err := riders.Generate(dataGenerator, 127, config.DistributionHotspot)
 	if err != nil {
 		t.Fatalf("GenerateRiders() error = %v", err)
 	}
@@ -108,7 +109,7 @@ func TestTopKMatchesBruteForceAndIsStable(t *testing.T) {
 		t.Fatalf("bruteforce.New() error = %v", err)
 	}
 	tree := mustMatcher(t, riders)
-	stream, err := orders.NewStream(dataGenerator, 500, 0, orders.ArrivalUnbounded, simulation.DistributionSkewed)
+	stream, err := orders.NewStream(dataGenerator, 500, 0, config.ArrivalUnbounded, config.DistributionSkewed)
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}
@@ -159,7 +160,7 @@ func TestMatchesBruteForceOnBoundaryOrders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("simulation.New() error = %v", err)
 	}
-	riders, err := riders.Generate(dataGenerator, 100, simulation.DistributionUniform)
+	riders, err := riders.Generate(dataGenerator, 100, config.DistributionUniform)
 	if err != nil {
 		t.Fatalf("GenerateRiders() error = %v", err)
 	}
@@ -193,7 +194,7 @@ func TestTreeBoundsContainEveryNodeAndChild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("simulation.New() error = %v", err)
 	}
-	riders, err := riders.Generate(dataGenerator, 1_000, simulation.DistributionSkewed)
+	riders, err := riders.Generate(dataGenerator, 1_000, config.DistributionSkewed)
 	if err != nil {
 		t.Fatalf("GenerateRiders() error = %v", err)
 	}
@@ -240,7 +241,7 @@ func TestNewOwnsRiderCoordinates(t *testing.T) {
 	}
 }
 
-func compareGeneratedMatchers(t *testing.T, riderCount, orderCount int, riderDistribution, orderDistribution simulation.SpatialDistribution) {
+func compareGeneratedMatchers(t *testing.T, riderCount, orderCount int, riderDistribution, orderDistribution config.SpatialDistribution) {
 	t.Helper()
 	dataGenerator, err := simulation.New(42, geo.SanFranciscoBounds)
 	if err != nil {
@@ -255,7 +256,7 @@ func compareGeneratedMatchers(t *testing.T, riderCount, orderCount int, riderDis
 		t.Fatalf("bruteforce.New() error = %v", err)
 	}
 	tree := mustMatcher(t, riders)
-	stream, err := orders.NewStream(dataGenerator, orderCount, 30*time.Second, orders.ArrivalUniformWindow, orderDistribution)
+	stream, err := orders.NewStream(dataGenerator, orderCount, 30*time.Second, config.ArrivalUniformWindow, orderDistribution)
 	if err != nil {
 		t.Fatalf("NewOrderStream() error = %v", err)
 	}
