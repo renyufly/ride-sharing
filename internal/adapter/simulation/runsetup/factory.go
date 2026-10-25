@@ -13,9 +13,9 @@ import (
 	"ride-sharing/internal/adapter/spatial/kdtree"
 	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/app/run"
-	"ride-sharing/internal/config"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/rider"
+	"ride-sharing/internal/platform/config"
 )
 
 // Factory assembles the existing simulated input and static spatial index.

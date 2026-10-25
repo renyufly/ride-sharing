@@ -6,7 +6,7 @@ import (
 
 	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/app/run"
-	"ride-sharing/internal/config"
+	"ride-sharing/internal/platform/config"
 )
 
 // Prepare builds the next whole-round run from deferred orders.

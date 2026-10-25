@@ -1,6 +1,6 @@
 // Package resource samples Go runtime memory and GC metrics for one matcher
 // run. It reports Go-managed memory, not operating-system RSS.
-package resource
+package metrics
 
 import (
 	"errors"
@@ -16,28 +16,28 @@ import (
 
 // 一次测试运行结束以后，资源监控器输出的最终统计结果
 type Stats struct {
-	SampleInterval       string `json:"sampleInterval"`   // 采样间隔
+	SampleInterval       string `json:"sampleInterval"` // 采样间隔
 	ElapsedNs            int64  `json:"elapsedNs"`
-	Samples              uint64 `json:"samples"`    // 采样次数
+	Samples              uint64 `json:"samples"` // 采样次数
 	StartHeapAllocBytes  uint64 `json:"startHeapAllocBytes"`
 	EndHeapAllocBytes    uint64 `json:"endHeapAllocBytes"`
-	PeakHeapAllocBytes   uint64 `json:"peakHeapAllocBytes"`  // 运行过程中 Go 堆中“当前存活对象”最高占用了多少空间
-	PeakHeapInuseBytes   uint64 `json:"peakHeapInuseBytes"`  // Go Runtime 已经划给 Heap 使用的内存区域
+	PeakHeapAllocBytes   uint64 `json:"peakHeapAllocBytes"` // 运行过程中 Go 堆中“当前存活对象”最高占用了多少空间
+	PeakHeapInuseBytes   uint64 `json:"peakHeapInuseBytes"` // Go Runtime 已经划给 Heap 使用的内存区域
 	PeakRuntimeSysBytes  uint64 `json:"peakRuntimeSysBytes"`
-	TotalAllocDeltaBytes uint64 `json:"totalAllocDeltaBytes"`  // 整个运行过程中累计申请了多少堆内存 (申请后可以释放)
+	TotalAllocDeltaBytes uint64 `json:"totalAllocDeltaBytes"` // 整个运行过程中累计申请了多少堆内存 (申请后可以释放)
 	MallocsDelta         uint64 `json:"mallocsDelta"`
 	FreesDelta           uint64 `json:"freesDelta"`
-	NumGCDelta           uint32 `json:"numGCDelta"`  // 一共触发多少次 GC
+	NumGCDelta           uint32 `json:"numGCDelta"` // 一共触发多少次 GC
 	GCPauseDeltaNs       uint64 `json:"gcPauseDeltaNs"`
-	PeakGoroutines       int    `json:"peakGoroutines"`  // 整个运行期间观测到的最大 goroutine 数量
-	PeakStackInuseBytes  uint64 `json:"peakStackInuseBytes"`  // 当前正在使用的 goroutine 栈区域
-	PeakStackSysBytes	 uint64 `json:"peakStackSysBytes"`  // Runtime 从系统获得的栈内存
+	PeakGoroutines       int    `json:"peakGoroutines"`      // 整个运行期间观测到的最大 goroutine 数量
+	PeakStackInuseBytes  uint64 `json:"peakStackInuseBytes"` // 当前正在使用的 goroutine 栈区域
+	PeakStackSysBytes    uint64 `json:"peakStackSysBytes"`   // Runtime 从系统获得的栈内存
 }
 
 type Monitor struct {
 	interval time.Duration
 	started  time.Time
-	start    runtime.MemStats  // 程序开始监控时的 Runtime 快照
+	start    runtime.MemStats // 程序开始监控时的 Runtime 快照
 	stop     chan struct{}
 	done     sync.WaitGroup
 	stopOnce sync.Once
@@ -91,7 +91,7 @@ func (m *Monitor) sample() {
 		peakHeapInuse = max(peakHeapInuse, end.HeapInuse)
 		peakSys = max(peakSys, end.Sys)
 		peakGoroutines = max(peakGoroutines, runtime.NumGoroutine())
-	
+
 		peakStackInuse = max(peakStackInuse, end.StackInuse)
 		peakStackSys = max(peakStackSys, end.StackSys)
 	}
@@ -118,8 +118,8 @@ func (m *Monitor) sample() {
 				NumGCDelta:           uint32(delta(uint64(end.NumGC), uint64(m.start.NumGC))),
 				GCPauseDeltaNs:       delta(end.PauseTotalNs, m.start.PauseTotalNs),
 				PeakGoroutines:       peakGoroutines,
-				PeakStackInuseBytes: peakStackInuse,
-				PeakStackSysBytes: peakStackSys,
+				PeakStackInuseBytes:  peakStackInuse,
+				PeakStackSysBytes:    peakStackSys,
 			}
 			m.mu.Unlock()
 			return

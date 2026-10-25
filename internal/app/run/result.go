@@ -3,10 +3,10 @@ package run
 import (
 	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/app/report"
-	"ride-sharing/internal/config"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/rider"
-	"ride-sharing/internal/resource"
+	"ride-sharing/internal/platform/config"
+	"ride-sharing/internal/platform/metrics"
 	"time"
 )
 
@@ -22,7 +22,7 @@ type Result struct {
 	Index               report.IndexStats
 	MemoryEstimate      *appmatching.MemoryEstimate
 	BalancedMemory      *appmatching.BalancedMemoryEstimate
-	Resources           resource.Stats
+	Resources           metrics.Stats
 	Timing              Timing
 	GOMAXPROCS          int
 }

@@ -5,11 +5,11 @@ import (
 	"errors"
 	"fmt"
 	appmatching "ride-sharing/internal/app/matching"
-	"ride-sharing/internal/config"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/rider"
+	"ride-sharing/internal/platform/config"
 
-	"ride-sharing/internal/resource"
+	"ride-sharing/internal/platform/metrics"
 	"runtime"
 	"time"
 )
@@ -65,7 +65,7 @@ func Run(ctx context.Context, req Request, factory InputFactory) (ret Result, re
 	runtime.GC()
 	totalstarted := time.Now()
 
-	resourceMonitor, err := resource.Start(effectiveConfig.MonitorInterval)
+	resourceMonitor, err := metrics.Start(effectiveConfig.MonitorInterval)
 	if err != nil {
 		return Result{}, err
 	}

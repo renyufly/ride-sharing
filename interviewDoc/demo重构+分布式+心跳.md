@@ -280,6 +280,10 @@ infra/                          沿用现有 Docker、Kubernetes 目录
 - `internal/resource` → `internal/platform/metrics`：只迁移已有的 Go 运行时采样和汇总能力，不补建空的日志、追踪目录。
 - `matcherapi.Handler` 中的 `runSlot`、`lastSession`、RunID 和轮次状态 → `internal/adapter/session/memory`，或由 `app/run` 中的单实例会话对象管理。保留当前“同时只运行一场”和 Retry 对 RunID、来源轮次、Deferred 集合的判断；不把它误写成跨实例存储。
 
+**步骤五执行结果（2026-10-25）：**原 `internal/config` 的运行配置、默认值、显示配置和校验已迁至 `internal/platform/config`；`flag` 解析及对应入口测试移至 `cmd/matcher`，HTTP 请求映射继续留在现有 `matcherapi`，等待步骤六。原 `internal/resource` 的 Go 运行时采样和统计移至 `internal/platform/metrics`，采样字段与 JSON 名称未变。`internal/adapter/session/memory` 现持有单实例运行槽、最新 RunID、轮次、Deferred 集合及 Retry 状态判断；现有 HTTP Handler 仍按原错误状态码与文案映射，轮次响应 DTO 通过泛型存储而未变为会话包的业务类型。运行成功后才保存新会话，Retry 成功后才推进轮次；该状态只在本进程内有效。
+
+**步骤五验证：**`go build ./...`、`go test -skip TestArrivalModels ./...` 通过；配置入口、资源监控、会话运行槽与 Retry 各状态、HTTP Run/Retry 测试通过。CLI 小规模运行的 JSON 中 `riderCount=2`、`completedOrderCount=3`。全量测试仍会触发步骤三已记录的 `TestArrivalModels` 到达时间断言不一致，本步骤未修改到达算法或测试预期。
+
 ### 步骤 6：迁移 HTTP，接回两个入口
 
 将 `internal/matcherapi` 的请求 DTO、响应 DTO、字段映射、输入校验和 Handler 移到 `internal/transport/http/run`。保持原有 JSON 字段、错误响应、状态码、路由及同步调用。随后由 `cmd/matcherapi/main.go` 装配新包，仍提供 `/matcher/run` 与 `/matcher/retry`。

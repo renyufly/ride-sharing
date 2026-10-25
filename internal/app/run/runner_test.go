@@ -9,7 +9,7 @@ import (
 	"ride-sharing/internal/adapter/simulation/orders"
 	"ride-sharing/internal/adapter/simulation/runsetup"
 	"ride-sharing/internal/app/run"
-	"ride-sharing/internal/config"
+	"ride-sharing/internal/platform/config"
 )
 
 func TestRunKeepsNearestAndBalancedAssignmentCounts(t *testing.T) {

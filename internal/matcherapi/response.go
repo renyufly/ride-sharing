@@ -3,7 +3,7 @@ package matcherapi
 import (
 	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/app/report"
-	"ride-sharing/internal/resource"
+	"ride-sharing/internal/platform/metrics"
 )
 
 // 后端最终返回给前端什么
@@ -21,7 +21,7 @@ type RunResponse struct {
 	Map         RunMapResponse                 `json:"map"`
 	Performance appmatching.PerformanceMetrics `json:"performance"`
 	Fairness    report.Summary                 `json:"fairness"`
-	Resources   resource.Stats                 `json:"resources"`
+	Resources   metrics.Stats                  `json:"resources"`
 	Index       report.IndexStats              `json:"index"`
 	Strategy    *appmatching.StrategyMetrics   `json:"strategy,omitempty"`
 	Deferred    DeferredResponse               `json:"deferred"`

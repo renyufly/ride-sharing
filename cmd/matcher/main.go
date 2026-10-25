@@ -22,8 +22,8 @@ import (
 	"ride-sharing/internal/adapter/deferred/file"
 	"ride-sharing/internal/adapter/simulation/runsetup"
 	"ride-sharing/internal/app/report"
-	"ride-sharing/internal/config"
-	"ride-sharing/internal/resource"
+	"ride-sharing/internal/platform/config"
+	"ride-sharing/internal/platform/metrics"
 
 	"ride-sharing/internal/app/run"
 )
@@ -63,7 +63,7 @@ type dataOutput struct {
 	Index                 report.IndexStats                   `json:"index"`
 	Timing                timingOutput                        `json:"timing"`
 	Performance           appmatching.PerformanceMetrics      `json:"performance"`
-	Resources             resource.Stats                      `json:"resources"`
+	Resources             metrics.Stats                       `json:"resources"`
 	RiderPreview          []riderOutput                       `json:"riderPreview"`
 	OrderPreview          []orderOutput                       `json:"orderPreview"`
 	AssignmentPreview     []assignmentOutput                  `json:"assignmentPreview"`
@@ -137,7 +137,7 @@ type readableSummary struct {
 }
 
 func main() {
-	cfg, err := config.Parse(os.Args[1:]) // 读取配置
+	cfg, err := parseConfig(os.Args[1:]) // 读取配置
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "invalid matcher configuration: %v\n", err)
 		os.Exit(2)

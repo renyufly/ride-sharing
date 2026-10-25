@@ -5,11 +5,11 @@ import (
 	"ride-sharing/internal/adapter/deferred/memory"
 	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/app/run"
-	"ride-sharing/internal/config"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
+	"ride-sharing/internal/platform/config"
 )
 
 func toRunResponse(result run.Result, snapshot memory.MemorySnapshot, previewSize int, runid string, currentRound int, rounds []RoundResponse) RunResponse {

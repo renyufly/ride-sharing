@@ -5,7 +5,7 @@ import (
 	"ride-sharing/internal/adapter/simulation"
 	"ride-sharing/internal/adapter/simulation/orders"
 	"ride-sharing/internal/app/run"
-	"ride-sharing/internal/config"
+	"ride-sharing/internal/platform/config"
 	"time"
 )
 

@@ -3,43 +3,25 @@ package matcherapi
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"ride-sharing/internal/adapter/deferred/memory"
+	sessionmemory "ride-sharing/internal/adapter/session/memory"
 	"ride-sharing/internal/adapter/simulation/runsetup"
-	appmatching "ride-sharing/internal/app/matching"
 	"ride-sharing/internal/app/run"
 	"ride-sharing/internal/app/run/replay"
-	"ride-sharing/internal/config"
+	"ride-sharing/internal/platform/config"
 )
 
 // 后端收到请求后怎么处理
 // 处理 HTTP 请求，然后把任务交给真正的业务层
 
 type Handler struct {
-	runSlot     chan struct{}
-	nextRunID   uint64
-	lastSession *retrySession
-}
-
-type retrySession struct {
-	runID          string
-	currentRound   int
-	config         config.Config
-	previewSize    int
-	deferredOrders []appmatching.DeferredOrder
-	rounds         []RoundResponse
+	sessions *sessionmemory.Manager[RoundResponse]
 }
 
 func NewHandler() *Handler {
-	handler := Handler{
-		runSlot: make(chan struct{}, 1),
-	}
-
-	// 所有请求必须共享同一个 channel
-	return &handler
-
+	return &Handler{sessions: sessionmemory.New[RoundResponse]()}
 }
 
 // 辅助函数
@@ -92,15 +74,14 @@ func (h *Handler) Run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	select {
-	case h.runSlot <- struct{}{}:
-		defer func() { <-h.runSlot }()
-	default:
+	lease, ok := h.sessions.TryBegin()
+	if !ok {
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Error: "a match run is already in progress",
 		})
 		return
 	}
+	defer lease.End()
 
 	var memorySink *memory.MemorySink
 	if runRequest.Config.Strategy == config.StrategyBalanced {
@@ -145,30 +126,8 @@ func (h *Handler) Run(w http.ResponseWriter, r *http.Request) {
 		runResult.Config.ArrivalWindow.Milliseconds(),
 	)
 
-	h.nextRunID++
-	runID := fmt.Sprintf("run-%d", h.nextRunID)
-
-	rounds := []RoundResponse{firstRound}
-
-	h.lastSession = &retrySession{
-		runID:        runID,
-		currentRound: 1,
-		config:       runResult.Config,
-		previewSize:  runRequest.PreviewSize,
-		deferredOrders: append(
-			[]appmatching.DeferredOrder(nil),
-			memorySnapshot.Orders...,
-		),
-		rounds: rounds,
-	}
-
-	// runResponse := RunResponse{
-	// 	Result: runResult,
-	// 	OrderPreview: runResult.Pipeline.OrderPreview,
-	// 	AssignmentPreview: runResult.Pipeline.AssignmentPreview,
-	// 	Deferred: memorySnapshot,
-	// }
-	runResponse := toRunResponse(runResult, memorySnapshot, runRequest.PreviewSize, runID, 1, rounds)
+	saved := lease.SaveFirst(runResult.Config, runRequest.PreviewSize, memorySnapshot.Orders, firstRound)
+	runResponse := toRunResponse(runResult, memorySnapshot, runRequest.PreviewSize, saved.RunID, saved.CurrentRound, saved.Rounds)
 
 	writeJSON(w, http.StatusOK, runResponse)
 
@@ -205,51 +164,38 @@ func (h *Handler) Retry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 获取与普通 Run 相同的运行槽。
-	select {
-	case h.runSlot <- struct{}{}:
-		defer func() {
-			<-h.runSlot
-		}()
-
-	default:
+	lease, ok := h.sessions.TryBegin()
+	if !ok {
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Error: "a match run is already in progress",
 		})
 		return
 	}
+	defer lease.End()
 
-	session := h.lastSession
-
-	if session == nil {
+	session, status := lease.RetryState(apiRequest.RunID, apiRequest.SourceRound)
+	switch status {
+	case sessionmemory.RetrySessionMissing:
 		writeJSON(w, http.StatusNotFound, ErrorResponse{
 			Error: "run session not found",
 		})
 		return
-	}
-
-	if apiRequest.RunID != session.runID {
+	case sessionmemory.RetryRunReplaced:
 		writeJSON(w, http.StatusNotFound, ErrorResponse{
 			Error: "run session not found or replaced",
 		})
 		return
-	}
-
-	if apiRequest.SourceRound != session.currentRound {
+	case sessionmemory.RetryRoundStale:
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Error: "source round is stale",
 		})
 		return
-	}
-
-	if len(session.deferredOrders) == 0 {
+	case sessionmemory.RetryNoDeferredOrders:
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Error: "no deferred orders available for retry",
 		})
 		return
-	}
-
-	if session.config.Strategy != config.StrategyBalanced {
+	case sessionmemory.RetryRequiresBalanced:
 		writeJSON(w, http.StatusConflict, ErrorResponse{
 			Error: "retry requires balanced strategy",
 		})
@@ -257,8 +203,8 @@ func (h *Handler) Retry(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 准备下一轮。
-	nextRound := session.currentRound + 1
-	inputCount := len(session.deferredOrders)
+	nextRound := session.CurrentRound + 1
+	inputCount := len(session.DeferredOrders)
 
 	memorySink, err := memory.NewMemorySink(inputCount)
 	if err != nil {
@@ -268,16 +214,16 @@ func (h *Handler) Retry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	memorySource, err := memory.NewMemorySource(session.deferredOrders)
+	memorySource, err := memory.NewMemorySource(session.DeferredOrders)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "cannot create retry memory source"})
 		return
 	}
 
 	retryRequest, err := replay.Prepare(
-		session.config, session.currentRound, inputCount,
+		session.Config, session.CurrentRound, inputCount,
 		apiRequest.MaxOrdersPerRider, apiRequest.GracePeriodMs,
-		session.previewSize, memorySource, memorySink,
+		session.PreviewSize, memorySource, memorySink,
 	)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "cannot prepare retry run"})
@@ -302,46 +248,23 @@ func (h *Handler) Retry(w http.ResponseWriter, r *http.Request) {
 	roundResponse := mapRoundResponse(
 		result,
 		snapshot,
-		session.previewSize,
+		session.PreviewSize,
 		nextRound,
 		"deferred",
 		apiRequest.SourceRound,
 		retryConfig.ArrivalWindow.Milliseconds(),
 	)
 
-	// 创建新的轮次历史
-	newRounds := make(
-		[]RoundResponse,
-		0,
-		len(session.rounds)+1,
-	)
-
-	newRounds = append(newRounds, session.rounds...)
-	newRounds = append(newRounds, roundResponse)
-
-	// 准备新的 Session
-	newSession := &retrySession{
-		runID:        session.runID,
-		currentRound: nextRound,
-		config:       retryConfig,
-		previewSize:  session.previewSize,
-		deferredOrders: append(
-			[]appmatching.DeferredOrder(nil),
-			snapshot.Orders...,
-		),
-		rounds: newRounds,
-	}
+	saved := lease.SaveNext(retryConfig, snapshot.Orders, roundResponse)
 
 	response := toRunResponse(
 		result,
 		snapshot,
-		session.previewSize,
-		session.runID,
-		nextRound,
-		newRounds,
+		saved.PreviewSize,
+		saved.RunID,
+		saved.CurrentRound,
+		saved.Rounds,
 	)
-
-	h.lastSession = newSession
 
 	writeJSON(w, http.StatusOK, response)
 

@@ -6,9 +6,9 @@ import (
 	"time"
 
 	appmatching "ride-sharing/internal/app/matching"
-	"ride-sharing/internal/config"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/rider"
+	"ride-sharing/internal/platform/config"
 )
 
 // Matcher supplies both strategies over one static rider set.

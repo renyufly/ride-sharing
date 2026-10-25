@@ -2,7 +2,7 @@ package run
 
 import (
 	appmatching "ride-sharing/internal/app/matching"
-	"ride-sharing/internal/config"
+	"ride-sharing/internal/platform/config"
 )
 
 type Request struct {
