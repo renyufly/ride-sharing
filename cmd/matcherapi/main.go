@@ -7,7 +7,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+
+	"ride-sharing/internal/adapter/realtime"
+	"ride-sharing/internal/app/dispatch"
+	"ride-sharing/internal/platform/config"
 	runhttp "ride-sharing/internal/transport/http/run"
+	riderws "ride-sharing/internal/transport/ws/rider"
 	"ride-sharing/shared/env"
 	"syscall"
 	"time"
@@ -25,6 +31,31 @@ func main() {
 	handler := runhttp.NewHandler()
 
 	mux := newMux(handler)
+
+	// 建立骑手连接
+	realtimeConfig := config.DefaultRealtime()
+	if err := realtimeConfig.Validate(); err != nil {
+		log.Fatal(err)
+	}
+
+	connections := realtime.NewManager(realtimeConfig.WriteTimeout)
+	dispatcher := dispatch.NewService()
+
+	mux.Handle("GET /matcher/ws/rider", riderws.NewHandler(
+		connections,
+		dispatcher,
+		identifyDemoRider,
+		realtimeConfig.ReadLimitBytes,
+		realtimeConfig.WriteTimeout,
+		realtimeConfig.PingInterval,
+		realtimeConfig.PongTimeout,
+	))
+
+	mux.Handle("POST /matcher/live/demo", runhttp.NewLiveHandler(
+		dispatcher,
+		connections,
+		realtimeConfig.ResponseTimeout,
+	))
 
 	server := &http.Server{
 		Addr:              httpAddr,
@@ -74,4 +105,13 @@ func newMux(handler *runhttp.Handler) *http.ServeMux {
 	mux.HandleFunc("POST /matcher/run", handler.Run)
 	mux.HandleFunc("POST /matcher/retry", handler.Retry)
 	return mux
+}
+
+
+func identifyDemoRider(r *http.Request) (uint64, error) {
+	uid, err := strconv.ParseUint(r.URL.Query().Get("riderUid"), 10, 64)
+	if err != nil || uid == 0 {
+		return 0, errors.New("invalid rider UID")
+	}
+	return uid, nil
 }

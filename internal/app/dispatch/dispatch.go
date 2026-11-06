@@ -11,6 +11,8 @@ import (
 	"github.com/google/uuid"
 )
 
+var ErrNoRiderAccepted = errors.New("no candidate rider accepted the order")
+
 // Dispatch 向候选骑手发起接单邀请。
 //
 // 该方法首先查找距离订单最近的 topK 名骑手，然后依次发送邀请。
@@ -120,6 +122,5 @@ func (s *Service) Dispatch(ctx context.Context, order order.Order,
 			}, attempts, nil
 		}
 
-		return matching.Assignment{}, attempts, 
-		errors.New("no candidate rider accepted the order")
+		return matching.Assignment{}, attempts, ErrNoRiderAccepted
 }
