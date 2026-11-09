@@ -1,6 +1,9 @@
 package dispatch
 
-import "sync"
+import (
+	"ride-sharing/internal/domain/matching"
+	"sync"
+)
 
 // 一条等待回复的接单请求
 type pendingRequest struct {
@@ -13,11 +16,16 @@ type pendingRequest struct {
 type Service struct {
 	mu      sync.Mutex
 	pending map[string]pendingRequest // requestID → pendingRequest
+	dispatchMu sync.Mutex 
+	loads      map[uint64]uint64   // riderUID -> orderCount
+	assigned   map[uint64]matching.Assignment  // riderUID -> assignment
 }
 
 func NewService() *Service{
 	return &Service{
 		pending: make(map[string]pendingRequest),
+		loads: make(map[uint64]uint64),
+		assigned: make(map[uint64]matching.Assignment),
 	}
 }
 

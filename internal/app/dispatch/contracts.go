@@ -16,7 +16,7 @@ type Offer struct {
 	RequestID string
 }
 
-// TODO: 由 adapter/realtime 实现。
+
 type Sender interface {
 	SendOffer(ctx context.Context, riderUID uint64, offer Offer) error
 }

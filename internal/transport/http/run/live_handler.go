@@ -10,18 +10,19 @@ import (
 	"ride-sharing/internal/adapter/simulation/runsetup"
 	appdispatch "ride-sharing/internal/app/dispatch"
 	apprun "ride-sharing/internal/app/run"
+	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/platform/config"
 )
 
 type LiveHandler struct {
 	dispatcher      *appdispatch.Service
-	sender          appdispatch.Sender
+	sender          liveSender
 	responseTimeout time.Duration
 }
 
 func NewLiveHandler(
 	dispatcher *appdispatch.Service,
-	sender appdispatch.Sender,
+	sender liveSender,
 	responseTimeout time.Duration,
 ) *LiveHandler {
 	return &LiveHandler{
@@ -32,9 +33,16 @@ func NewLiveHandler(
 }
 
 type LiveRequest struct {
-	RiderCount int   `json:"riderCount"`
 	TopK       int   `json:"topK"`
 	Seed       int64 `json:"seed"`
+	OrderCount             int     `json:"orderCount"`
+	MaxExtraDistanceMeters float64 `json:"maxExtraDistanceMeters"`
+	MaxOrdersPerRider      int     `json:"maxOrdersPerRider"`
+}
+
+type liveSender interface {
+	appdispatch.Sender
+	SnapshotLocations() map[uint64]geo.GeoPoint
 }
 
 func (h *LiveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -55,20 +63,30 @@ func (h *LiveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if request.RiderCount <= 0 || request.TopK <= 0 ||
-		request.TopK > request.RiderCount {
+	locations := h.sender.SnapshotLocations()
+	if len(locations) == 0 {
+		writeJSON(w, http.StatusConflict, ErrorResponse{
+			Error: "no online riders have reported locations",
+		})
+		return
+	}
+	if request.TopK <= 0 || request.TopK > len(locations) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{
-			Error: "require riderCount > 0 and 0 < topK <= riderCount",
+			Error: "topK must be between 1 and the number of online riders",
 		})
 		return
 	}
 
 	cfg := config.Default()
-	cfg.RiderCount = request.RiderCount
-	cfg.OrderCount = 1
+	cfg.RiderCount = len(locations)
+	cfg.OrderCount = request.OrderCount
 	cfg.Seed = request.Seed
 	cfg.Strategy = config.StrategyBalanced
 	cfg.TopK = request.TopK
+
+	cfg.MaxExtraDistanceMeters = request.MaxExtraDistanceMeters
+	cfg.MaxOrdersPerRider = request.MaxOrdersPerRider
+
 	cfg.ArrivalWindow = time.Second
 	cfg.ArrivalModel = config.ArrivalUnbounded
 	cfg.RunTimeout = 2 * time.Minute
@@ -76,7 +94,8 @@ func (h *LiveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	result, err := apprun.RunLive(
 		r.Context(),
 		cfg,
-		runsetup.Factory{},
+		runsetup.Factory{RiderLocations: locations},  // runsetup.Factory{},
+		nil,
 		h.dispatcher,
 		h.sender,
 		h.responseTimeout,

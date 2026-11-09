@@ -18,14 +18,13 @@ import (
 	"ride-sharing/internal/app/report"
 )
 
-// Strategy B：在“距离尽量近”的前提下，兼顾骑手订单量均衡
-// 先找到订单附近的 Top-K 个候选骑手，再从“距离可以接受”的候选骑手里优先选择当前订单量较少的骑手
+// 找到订单附近的 Top-K 个候选骑手，再从“距离可以接受”的候选骑手里优先选择当前订单量较少的骑手
 /*
 不能让 Worker 直接完成分配：1.数据竞争 2.加锁也结果不确定
 所以：并行计算候选人，串行完成最终决策
 */
 
-// 给我一个订单，找出距离最近的 K 个骑手
+// 找出距离最近的 K 个骑手
 type CandidateMatcher interface {
 	TopKInto(order.Order, int, []matching.Candidate) ([]matching.Candidate, error)
 }
@@ -156,10 +155,6 @@ type balancedSelection struct {
 }
 
 // 一个 Batch 包含多个订单
-// Worker 不需要每次从 channel 拿一个订单，而是：
-// 拿一个 batch
-// 连续处理 4 个订单
-// 减少 channel 通信开销
 type balancedBatch struct {
 	jobs       []*candidateResult
 	admittedNs atomic.Int64
@@ -203,7 +198,11 @@ func (e *CandidatePanicError) Error() string {
 	return fmt.Sprintf("candidate worker %d panicked on order ID %d sequence %d: %v\n%s", e.WorkerID, e.OrderID, e.Sequence, e.Recovered, e.Stack)
 }
 
-// 实际执行
+// RunBalanced:
+// Producer：生成订单并组装 Batch
+// -> batchChannel：批量订单队列 (Worker1, Worker2...)
+// -> candidateChannel：候选结果队列
+// -> Coordinator：按 Sequence 顺序分配 (选择骑手 → 更新 loads → 统计结果)
 func RunBalanced(
 	ctx context.Context,
 	source OrderSource,
@@ -226,45 +225,54 @@ func RunBalanced(
 	}
 
 	// 任何一个 Producer / Worker / Coordinator 出错，
-	// 都可以调用 cancel() 通知其他 Goroutine 停止
+	// 调用 cancel() 通知其他 Goroutine 停止
 	runContext, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	runStarted := time.Now()
+	// 创建 Batch 队列: Producer 将一批订单发送给 Worker
 	batchChannel := make(chan *balancedBatch, options.ChannelCapacity)
+	// 创建 Batch 对象池: 复用 Batch
 	batchPool := make(chan *balancedBatch, options.ChannelCapacity+options.Workers)
 	for range cap(batchPool) {
 		batchPool <- &balancedBatch{jobs: make([]*candidateResult, 0, options.BatchSize)}
 	}
 	reorderWindow := options.ReorderWindow()
 
-	// 提前创建对象
+	// 创建候选结果对象池 
 	candidatePool := make(chan *candidateResult, reorderWindow)
 	for range cap(candidatePool) {
 		candidatePool <- &candidateResult{candidates: make([]matching.Candidate, 0, options.TopK)}
 	}
 
+	// Worker 将计算好的候选结果发送给 Coordinator
 	candidateChannel := make(chan *candidateResult, options.ChannelCapacity)
+	
+	// 创建结果通知 Channel
 	var maxCandidateQueueDepth atomic.Int64
 	producerResults := make(chan producerResult, 1)
 	workerResults := make(chan candidateWorkerResult, options.Workers)
 	coordinatorResults := make(chan coordinatorResult, 1)
 
+	// 启动一个 Producer: 生成订单、控制到达时间、组装 Batch
 	go produceBalanced(runContext, cancel, runStarted, source, batchChannel, batchPool, candidatePool, options.Options, producerResults)
 
-	// 只有一个 Coordinator Goroutine
+	// 启动一个 Coordinator: 最终骑手选择和订单量统计
 	go coordinateBalanced(runContext, cancel, runStarted, candidateChannel, candidatePool, riders, options, coordinatorResults, deferredSink)
 
+	// 启动多个 Worker
 	var workers sync.WaitGroup
 	workers.Add(options.Workers)
 	for workerID := 0; workerID < options.Workers; workerID++ {
 		go func() {
 			defer workers.Done()
+			// 每个 Worker 独立计算订单的 Top-K 候选骑手
 			findCandidates(runContext, cancel, workerID, matcher, batchChannel, batchPool, candidateChannel, candidatePool, options.TopK, &maxCandidateQueueDepth, workerResults)
 		}()
 	}
 
 	producerState := <-producerResults
+	// 等待所有 Worker 结束
 	workers.Wait()
 	close(candidateChannel)
 	coordinatorState := <-coordinatorResults
@@ -284,6 +292,7 @@ func RunBalanced(
 		}
 	}
 
+	// 汇总统计数据和错误信息
 	result := Result{
 		GeneratedOrders:      producerState.generated,
 		AdmittedOrders:       producerState.admitted,
@@ -329,14 +338,11 @@ func RunBalanced(
 	if cause == nil {
 		cause = firstError(coordinatorState.err, workerError, producerState.err)
 	}
-	// if cause == nil && (result.GeneratedOrders != options.ExpectedOrders || result.AdmittedOrders != options.ExpectedOrders ||
-	// 	 result.Report.AssignmentCount != options.ExpectedOrders ||
-	// 	result.Report.RiderOrderCountSum != options.ExpectedOrders) {
-	// 	cause = errors.New("balanced completion violated order-count conservation")
-	// }
+	
 	if cause != nil {
 		return result, &RunError{Cause: cause, Generated: result.GeneratedOrders, Admitted: result.AdmittedOrders, Completed: result.CompletedOrders, Expected: options.ExpectedOrders}
 	}
+
 	return result, nil
 }
 
@@ -358,11 +364,7 @@ func firstError(values ...error) error {
 	return nil
 }
 
-// source.Next()
-//
-//	等待 PlannedArrival
-//	从 candidatePool 获取 envelope
-//	凑成 Batch 后发送
+// produceBalanced 生成订单并组装 Batch
 func produceBalanced(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -403,12 +405,14 @@ func produceBalanced(
 			state.err = ctx.Err()
 			return
 		case owned = <-pool:
-			owned.jobs = owned.jobs[:0]
+			// 从对象池取出一个可复用的 Batch
+			owned.jobs = owned.jobs[:0] // 清空旧订单，但保留底层数组
 			owned.admittedNs.Store(0)
 		}
 		sourceEnded := false
+		// 向 Batch 中填充订单
 		for len(owned.jobs) < options.BatchSize {
-			order, ok, err := source.Next()
+			order, ok, err := source.Next() // 从订单生成器获取下一笔订单
 			if err != nil {
 				state.err = fmt.Errorf("generate order: %w", err)
 				cancel()
@@ -428,25 +432,34 @@ func produceBalanced(
 			if len(state.preview) < options.PreviewSize {
 				state.preview = append(state.preview, order)
 			}
+
+			// 等待订单的计划到达时间
 			if err := waitForPlannedArrival(ctx, start, order.PlannedArrivalNs, timer); err != nil {
 				state.err = err
 				return
 			}
+
 			var envelope *candidateResult
 			select {
-			// 从 Pool 取对象
+			// 从对象池取出一个 candidateResult
 			case envelope = <-resultPool:
 			case <-ctx.Done():
 				state.err = ctx.Err()
 				return
 			}
+
+			// 将订单放进对象
 			envelope.order = order
 			envelope.candidates = envelope.candidates[:0]
+			// 加入当前 Batch
 			owned.jobs = append(owned.jobs, envelope)
 		}
+
+		// 将 Batch 发送给 Worker
 		if len(owned.jobs) != 0 {
 			select {
 			case batches <- owned:
+				// 记录 Batch 进入 Pipeline 的时间
 				admittedNs := time.Since(start).Nanoseconds()
 				for _, job := range owned.jobs {
 					job.admittedNs = admittedNs
@@ -463,7 +476,7 @@ func produceBalanced(
 
 				state.lastAdmissionNs = admittedNs
 
-				// 转移所有权并把 owned 设为 nil
+				// Producer 不再拥有这个 Batch, 后续由接收它的 Worker 负责处理和回收
 				owned = nil
 				if depth := len(batches); depth > state.maxQueueDepth {
 					state.maxQueueDepth = depth
@@ -479,6 +492,7 @@ func produceBalanced(
 	}
 }
 
+// findCandidates 可由多个 Goroutine 同时执行，只负责查找Top-K 候选骑手
 func findCandidates(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -517,6 +531,7 @@ func findCandidates(
 		case <-ctx.Done():
 			return
 		case batch, ok := <-batches:
+			// 从 Batch Channel 获取一批订单
 			if !ok {
 				return
 			}
@@ -524,6 +539,7 @@ func findCandidates(
 			nextJob = 0
 		}
 		admittedNs := int64(0)
+		// 等待 Producer 完成入队时间初始化
 		for admittedNs = ownedBatch.admittedNs.Load(); admittedNs == 0; admittedNs = ownedBatch.admittedNs.Load() {
 			select {
 			case <-ctx.Done():
@@ -539,8 +555,9 @@ func findCandidates(
 
 			searchStarted := time.Now()
 
-			// 计算 Top-K
-			candidates, err := matcher.TopKInto(envelope.order, topK, envelope.candidates[:0])
+			// 查找距离当前订单最近的 K 个骑手
+			candidates, err := matcher.TopKInto(envelope.order, topK, 
+				envelope.candidates[:0])
 			if err != nil {
 				envelope.candidates = envelope.candidates[:0]
 				resultPool <- envelope
@@ -552,12 +569,13 @@ func findCandidates(
 
 			searchDuration := time.Since(searchStarted)
 
+			// 保存候选骑手和搜索耗时
 			envelope.candidates = candidates
-
 			envelope.candidateSearchNs = searchDuration.Nanoseconds()
 
 			select {
 			case results <- envelope:
+				// 发送给 Coordinator，等待决定最终分配给谁
 				state.count++
 				nextJob++
 				observeAtomicMax(maxQueueDepth, int64(len(results)))
@@ -568,7 +586,10 @@ func findCandidates(
 				return
 			}
 		}
+
+		// 整批订单处理完毕, 将 Batch 放回对象池供 Producer 复用
 		recycleBalancedBatch(batchPool, ownedBatch)
+		// 所有权转移给 Coordinator
 		ownedBatch = nil
 	}
 }
@@ -588,6 +609,7 @@ func observeAtomicMax(target *atomic.Int64, value int64) {
 	}
 }
 
+// coordinateBalanced 按订单顺序进行最终分配
 func coordinateBalanced(
 	ctx context.Context,
 	cancel context.CancelFunc,
@@ -610,14 +632,14 @@ func coordinateBalanced(
 	uidIndex := make(map[uint64]int, len(riders))
 
 	// 只有 Coordinator 可以修改 loads
-	// 所以：不需要 mutex、不需要 atomic.Uint64[]
-	loads := make([]uint64, len(riders))
+	loads := make([]uint64, len(riders)) // loads[i] 第 i 个骑手已分配的订单数量
 	for index, rider := range riders {
 		uidIndex[rider.UID] = index
 	}
 
-	// 乱序缓冲区
+	// 乱序缓冲区 (Worker 并行计算，完成顺序不一定等于订单生成顺序)
 	pending := make(map[uint64]*candidateResult, options.ReorderWindow())
+	// 下一个应该处理的订单序号
 	next := uint64(0)
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -651,15 +673,18 @@ func coordinateBalanced(
 				cancel()
 				return
 			}
+
+			// 将 Worker 计算结果放入乱序缓冲区
 			pending[candidate.order.Sequence] = candidate
 			if len(pending) > state.maxReorderDepth {
 				state.maxReorderDepth = len(pending)
 			}
 
-			// Worker 可以乱序计算，但 Coordinator 必须顺序提交
+			// Coordinator 必须顺序提交, 按 Sequence 顺序处理
 			for {
 				ready, exists := pending[next]
 				if !exists {
+					// 暂时停止，等待后续 Worker 结果
 					break
 				}
 
@@ -669,9 +694,8 @@ func coordinateBalanced(
 				decisionStarted := time.Now() //
 
 				if options.AssignmentWindow > 0 && time.Since(start) >= options.AssignmentWindow {
-					// 超时，不能分配
+					// 超出窗口：记录为延迟订单 deferredOrder
 					deferredAt := time.Since(start).Nanoseconds()
-
 					deferredOrder := DeferredOrder{
 						Order:        ready.order,
 						Reason:       DeferredReasonWindowExpired,
@@ -698,7 +722,7 @@ func coordinateBalanced(
 					continue
 				}
 
-				// chooseBalanced()运行订单的骑手分配算法-完成最终骑手选择
+				// 根据距离、订单量和容量选择最终骑手
 				balancedSelection, err := chooseBalanced(ready.order, ready.candidates, loads, uidIndex, options.MaxExtraDistanceMeters, options.MaxOrdersPerRider)
 				if err != nil {
 					state.err = err
@@ -718,9 +742,8 @@ func coordinateBalanced(
 				state.capacityFiltered += balancedSelection.capacityFiltered
 
 				if balancedSelection.assigned == false {
-					// 全部满额度
+					// 候选骑手均无法接单, 记录为容量不足的延迟订单
 					deferredAt := time.Since(start).Nanoseconds()
-
 					deferredOrder := DeferredOrder{
 						Order:        ready.order,
 						Reason:       DeferredReasonCapacityExhausted,
@@ -749,46 +772,89 @@ func coordinateBalanced(
 					}
 
 				} else {
-					loads[balancedSelection.riderIndex]++ // 骑手订单增加
-
-					// Reporter 成功记录 Assignment
-					if err := reporter.Observe(balancedSelection.assignment); err != nil {
+					// 正式提交分配结果 (更新 loads)
+					if err := commitBalancedAssignment(
+						start,
+						ready,
+						balancedSelection,
+						loads,
+						&state,
+						options,
+					); err != nil {
 						state.err = err
 						cancel()
 						return
 					}
 
-					completedAt := time.Now()
-
-					state.lastCompletionNs = completedAt.Sub(start).Nanoseconds()
-					state.queueMatchLatency.Observe(state.lastCompletionNs - ready.admittedNs)
-					state.endToEndLatency.Observe(completedAt.Sub(start.Add(time.Duration(ready.order.PlannedArrivalNs))).Nanoseconds())
-
-					state.completed++ // 已完成分配的订单数量
-
-					elapsed := time.Since(start)
-					if elapsed < options.ObservationWindow {
-						state.completedWithinWindow += 1 //
-					}
-
-					if balancedSelection.assignment.Sequence < uint64(options.PreviewSize) {
-						state.preview = append(state.preview, balancedSelection.assignment)
-					}
-
 				}
 
+				// 删除已处理订单
 				delete(pending, next)
+				// 准备处理下一个订单
 				next++
-				// ready.candidates清空
-				ready.candidates = ready.candidates[:0] // [:0]不是释放底层数组，而是清空内容
-				// ready放回resultPool
+				
+				// 清空候选结果并放回对象池
+				ready.candidates = ready.candidates[:0] 
 				resultPool <- ready
 			}
 		}
 	}
 }
 
-// 在候选骑手中选择最终骑手
+// commitBalancedAssignment 正式提交一次骑手订单分配
+// 在骑手明确接单之后，调用该函数 (completed 表示匹配分配完成)
+// ready-当前订单及其候选骑手计算结果
+// selection-chooseBalanced() 选出的骑手
+// loads-每位骑手当前已分配的订单数
+// state-Coordinator 维护的统计结果
+func commitBalancedAssignment(
+	start time.Time,
+	ready *candidateResult,
+	selection balancedSelection,
+	loads []uint64,
+	state *coordinatorResult,
+	options BalancedOptions,
+) error {
+
+	// 确认订单是否已经找到可以分配的骑手
+	if !selection.assigned {
+		return errors.New("cannot commit an unassigned selection")
+	}
+
+	// 将本次分配结果交给 reporter 统计
+	if err := state.reporter.Observe(selection.assignment); err != nil {
+		return err
+	}
+	// 更新骑手订单量loads
+	loads[selection.riderIndex]++
+
+	// 记录当前订单完成匹配的时间
+	completedAt := time.Now()
+	state.lastCompletionNs = completedAt.Sub(start).Nanoseconds()
+	// 统计订单从进入 Pipeline 到完成匹配的延迟
+	state.queueMatchLatency.Observe(state.lastCompletionNs - ready.admittedNs)
+	// 从订单计划到达到最终匹配完成的总耗时
+	state.endToEndLatency.Observe(
+		completedAt.Sub(
+			start.Add(time.Duration(ready.order.PlannedArrivalNs)),
+		).Nanoseconds(),
+	)
+
+	state.completed++
+
+	if completedAt.Sub(start) < options.ObservationWindow {
+		state.completedWithinWindow++
+	}
+
+	if selection.assignment.Sequence < uint64(options.PreviewSize) {
+		// 保存少量分配结果作为预览
+		state.preview = append(state.preview, selection.assignment)
+	}
+
+	return nil
+}
+
+// chooseBalanced 负载均衡算法, 在候选骑手中选择最终骑手
 func chooseBalanced(
 	order order.Order,
 	candidates []matching.Candidate,
@@ -801,37 +867,30 @@ func chooseBalanced(
 		return balancedSelection{}, errors.New("balanced candidate list is empty")
 	}
 
-	// 使用当前第一个候选骑手计算最近距离
-	// 即使第一个骑手已经满额，距离基准仍然应该是“真正最近骑手”
-
+	// 以最近骑手的距离作为基准 (candidates 已经按距离从近到远排列)
 	nearestSquared := candidates[0].DistanceSquaredMeters
 	maxDistanceSquared := nearestSquared
-
+	// 计算允许的最远距离
 	if maxExtraDistanceMeters > 0 {
 		nearestMeters := math.Sqrt(candidates[0].DistanceSquaredMeters)
 		extra := maxExtraDistanceMeters
 
 		maxDistanceSquared = nearestSquared + 2*nearestMeters*extra + extra*extra
-
 	}
 
-	// maxDistanceSquared := (nearestMeters + maxExtraDistanceMeters) * (nearestMeters + maxExtraDistanceMeters)
-
-	// selected := candidates[0]
-	// selectedIndex, exists := uidIndex[selected.RiderUID]
-	// if !exists {
-	// 	return matching.Assignment{}, 0, fmt.Errorf("candidate rider UID %d is unknown", selected.RiderUID)
-	// }
 	selectedExists := false
 	selected := matching.Candidate{}
 	selectedIndex := -1
 	capacityFiltered := 0
 
-	// 遍历所有candidate
+	// 遍历 Top-K 候选骑手
 	for _, candidate := range candidates[0:] {
 		if candidate.DistanceSquaredMeters > maxDistanceSquared {
+			// 超出允许距离范围
 			break
 		}
+
+		// 找到骑手在 loads 中的下标
 		index, exists := uidIndex[candidate.RiderUID]
 		if !exists {
 			return balancedSelection{}, fmt.Errorf("candidate rider UID %d is unknown", candidate.RiderUID)
@@ -840,18 +899,14 @@ func chooseBalanced(
 			return balancedSelection{}, fmt.Errorf("rider's index out of range")
 		}
 
-		// 是否设置了骑手的订单限额 (0表示不限额)
+		// 检查骑手是否达到订单上限 (maxOrdersPerRider = 0 表示不限制)
 		hasLimit := maxOrdersPerRider > 0
-
 		isFull := hasLimit && loads[index] >= uint64(maxOrdersPerRider)
-
 		if isFull {
-			// 该骑手满额度
 			capacityFiltered += 1
 			continue
 		}
-
-		// 没有满额度且未选初始骑手
+		// 第一个符合条件的骑手作为初始选择
 		if !selectedExists {
 			selected = candidate
 			selectedIndex = index
@@ -859,8 +914,8 @@ func chooseBalanced(
 			continue
 		}
 
-		// 在距离允许范围内选择“最空闲骑手”
-		// 订单少；订单量相同时，谁距离更好；
+		// 优先选择订单量更少的骑手
+		// 订单量相同，则比较距离和 UID
 		if loads[index] < loads[selectedIndex] ||
 			(loads[index] == loads[selectedIndex] && matching.CandidateLess(candidate, selected)) {
 			selected = candidate
@@ -869,11 +924,13 @@ func chooseBalanced(
 	}
 
 	if selectedExists == false {
+		// 没有找到可分配骑手
 		return balancedSelection{
 			assigned:         false,
 			capacityFiltered: uint64(capacityFiltered),
 		}, nil
 	} else {
+		// 返回最终选择
 		return balancedSelection{
 			assignment:       matching.Assignment{OrderID: order.ID, Sequence: order.Sequence, RiderUID: selected.RiderUID, DistanceSquaredMeters: selected.DistanceSquaredMeters},
 			riderIndex:       selectedIndex,

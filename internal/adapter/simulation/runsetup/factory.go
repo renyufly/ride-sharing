@@ -3,6 +3,7 @@ package runsetup
 import (
 	"fmt"
 	"io"
+	"sort"
 	"time"
 
 	"ride-sharing/internal/adapter/deferred/file"
@@ -19,18 +20,49 @@ import (
 )
 
 // Factory assembles the existing simulated input and static spatial index.
-type Factory struct{}
+type Factory struct{
+	// nil：沿用模拟骑手；非 nil：使用在线骑手快照
+	RiderLocations map[uint64]geo.GeoPoint
+}
 
-func (Factory) Prepare(cfg config.Config, providedSource appmatching.OrderSource) (run.Prepared, error) {
+func (f Factory) Prepare(cfg config.Config, providedSource appmatching.OrderSource) (run.Prepared, error) {
 	riderStarted := time.Now()
 	scenario, err := simulation.New(cfg.Seed, geo.SanFranciscoBounds)
 	if err != nil {
 		return run.Prepared{}, err
 	}
-	riderSet, err := riders.Generate(scenario, cfg.RiderCount, cfg.RiderDistribution)
-	if err != nil {
-		return run.Prepared{}, fmt.Errorf("generate riders: %w", err)
+
+	var riderSet []rider.Rider
+	if f.RiderLocations == nil {
+		// 模拟生成固定位置的一大片骑手 (后续位置固定)
+		riderSet, err = riders.Generate(
+			scenario, cfg.RiderCount, cfg.RiderDistribution,
+		)
+		if err != nil {
+			return run.Prepared{}, err
+		}
+	} else {
+		// 使用在线骑手快照
+		if len(f.RiderLocations) == 0 {
+			return run.Prepared{}, fmt.Errorf("no online riders with locations")
+		}
+		// (riderUID -> location)
+		riderSet = make([]rider.Rider, 0, len(f.RiderLocations))
+		for uid, location := range f.RiderLocations {
+			point, err := scenario.Projector().Project(location)
+			if err != nil {
+				return run.Prepared{}, fmt.Errorf("project rider %d: %w", uid, err)
+			}
+			riderSet = append(riderSet, rider.Rider{
+				UID: uid, Location: location, Point: point,
+			})
+		}
+		sort.Slice(riderSet, func(i, j int) bool {
+			return riderSet[i].UID < riderSet[j].UID
+		})
 	}
+
+	
 	riderDuration := time.Since(riderStarted)
 
 	indexStarted := time.Now()
@@ -45,6 +77,7 @@ func (Factory) Prepare(cfg config.Config, providedSource appmatching.OrderSource
 		return run.Prepared{}, fmt.Errorf("create order source: %w", err)
 	}
 	seeds := scenario.Seeds()
+
 	return run.Prepared{
 		Config: cfg, Bounds: scenario.Bounds(), ProjectionOrigin: scenario.Origin(),
 		Seeds:  run.Seeds{Rider: seeds.Rider, Order: seeds.Order},

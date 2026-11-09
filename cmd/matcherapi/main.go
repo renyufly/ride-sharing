@@ -51,11 +51,11 @@ func main() {
 		realtimeConfig.PongTimeout,
 	))
 
-	mux.Handle("POST /matcher/live/demo", runhttp.NewLiveHandler(
-		dispatcher,
-		connections,
-		realtimeConfig.ResponseTimeout,
-	))
+	liveHandler := runhttp.NewLiveHandler(
+		dispatcher, connections, realtimeConfig.ResponseTimeout,
+	)
+	mux.Handle("POST /matcher/live/demo", liveHandler)
+	mux.HandleFunc("POST /matcher/live/order", liveHandler.Order)
 
 	server := &http.Server{
 		Addr:              httpAddr,

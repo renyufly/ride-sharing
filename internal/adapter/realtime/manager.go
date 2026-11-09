@@ -7,6 +7,7 @@ import (
 	"time"
 
 	appdispatch "ride-sharing/internal/app/dispatch"
+	"ride-sharing/internal/domain/geo"
 
 	"github.com/gorilla/websocket"
 )
@@ -14,6 +15,8 @@ import (
 type client struct{
 	connect *websocket.Conn
 	writeMu sync.Mutex
+	location    geo.GeoPoint
+	hasLocation bool
 }
 
 // 管理所有骑手的在线连接
@@ -54,6 +57,64 @@ func (m *Manager) Remove(riderUID uint64, connect *websocket.Conn) {
 	m.mu.Unlock()
 }
 
+// 骑手位置更新
+func (m *Manager) UpdateLocation(riderUID uint64,
+	conn *websocket.Conn,
+	location geo.GeoPoint,
+) error {
+	if err := geo.ValidatePoint(location); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	current := m.clients[riderUID]
+	if current == nil || current.connect != conn {
+		return errors.New("rider connection is no longer current")
+	}
+
+	current.location = location
+	current.hasLocation = true
+
+	return nil
+}
+
+// 验证骑手的接单respond 是否来自该骑手当前有效的 WebSocket 连接
+func (m *Manager) RespondFromCurrent(
+	riderUID uint64,
+	conn *websocket.Conn,
+	dispatcher *appdispatch.Service,
+	orderID uint64,
+	requestID string,
+	accepted bool,
+) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	current := m.clients[riderUID]
+	if current == nil || current.connect != conn {
+		return false
+	}
+
+	return dispatcher.Respond(orderID, riderUID, requestID, accepted)
+}
+
+// 获取所有已登记位置的骑手在线client, 返回位置的snapshot
+func (m *Manager) SnapshotLocations() map[uint64]geo.GeoPoint {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// (riderUID -> location)
+	locations := make(map[uint64]geo.GeoPoint, len(m.clients))
+	for uid, current := range m.clients {
+		if current.hasLocation {
+			locations[uid] = current.location
+		}
+	}
+	return locations
+}
+
 // WebSocket 消息格式
 type pickupPayload struct {
 	Latitude  float64 `json:"latitude"`
@@ -71,10 +132,22 @@ type offerMessage struct {
 	Data offerPayload `json:"data"`
 }
 
+// processed: false-请求已超时、已处理过或不再有效
+type responseAckMessage struct {
+	Type string `json:"type"`
+	Data struct {
+		OrderID   uint64 `json:"orderId"`
+		RequestID string `json:"requestId"`
+		Processed bool   `json:"processed"`
+	} `json:"data"`
+}
+
 const (
 	MessageOrderRequest = "matcher.order.request"
 	MessageOrderAccept  = "matcher.order.accept"
 	MessageOrderDecline = "matcher.order.decline"
+	MessageRiderLocation = "matcher.rider.location"
+	MessageResponseAck = "matcher.order.response_ack"
 )
 
 // SendOffer 向指定骑手发送派单邀请
@@ -92,10 +165,10 @@ func (m *Manager) SendOffer(ctx context.Context, riderUID uint64, offer appdispa
 	}
 
 	// 设置写入操作的超时时间
-	deadline := time.Now().Add(m.writeTimeout)
-	
 	current.writeMu.Lock()
 	defer current.writeMu.Unlock()
+
+	deadline := time.Now().Add(m.writeTimeout)
 
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
@@ -117,4 +190,35 @@ func (m *Manager) SendOffer(ctx context.Context, riderUID uint64, offer appdispa
 			},
 		},
 	})
+}
+
+
+func (m *Manager) SendResponseAck(
+	riderUID uint64,
+	conn *websocket.Conn,
+	orderID uint64,
+	requestID string,
+	processed bool,
+) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	current := m.clients[riderUID]
+	if current == nil || current.connect != conn {
+		return errors.New("rider connection is no longer current")
+	}
+
+	current.writeMu.Lock()
+	defer current.writeMu.Unlock()
+
+	if err := conn.SetWriteDeadline(time.Now().Add(m.writeTimeout)); err != nil {
+		return err
+	}
+
+	message := responseAckMessage{Type: MessageResponseAck}
+	message.Data.OrderID = orderID
+	message.Data.RequestID = requestID
+	message.Data.Processed = processed
+
+	return conn.WriteJSON(message)
 }

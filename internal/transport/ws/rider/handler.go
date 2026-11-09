@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"ride-sharing/internal/adapter/realtime"
 	"ride-sharing/internal/app/dispatch"
+	"ride-sharing/internal/domain/geo"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -37,6 +38,12 @@ func NewHandler(
 		connections: connections,
 		dispatcher:  dispatcher,
 		identify:    identify,
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				origin := r.Header.Get("Origin")
+				return origin == "" || origin == "http://localhost:3000"
+			},
+		},
 		readLimitBytes: readLimitBytes,
 		writeTimeout: writeTimeout,
 		pingInterval: pingInterval,
@@ -50,6 +57,10 @@ type incomingMessage struct {
 	Data struct {
 		OrderID   uint64 `json:"orderId"`
 		RequestID string `json:"requestId"`
+		Location *struct {
+			Latitude  float64 `json:"latitude"`
+			Longitude float64 `json:"longitude"`
+		} `json:"location"`
 	} `json:"data"`
 }
 
@@ -115,18 +126,42 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// 发生错误，结束读取循环，清理连接
 			return
 		}
-		if message.Data.RequestID == "" {
-			continue
-		}
 
-		// 将接受或拒绝 转交给 派单service
+		// 将 骑手位置更新 / 接单 / 拒单 转交给 派单service
 		switch message.Type {
-		case realtime.MessageOrderAccept:
-			h.dispatcher.Respond(message.Data.OrderID, riderUID, 
-				message.Data.RequestID, true)
-		case realtime.MessageOrderDecline:
-			h.dispatcher.Respond(message.Data.OrderID, riderUID, 
-				message.Data.RequestID, false)
+		case realtime.MessageRiderLocation:
+			if message.Data.Location == nil {
+				continue
+			}
+			location := geo.GeoPoint{
+				Latitude:  message.Data.Location.Latitude,
+				Longitude: message.Data.Location.Longitude,
+			}
+			if err := h.connections.UpdateLocation(riderUID, conn, location); err != nil {
+				continue
+			}
+		case realtime.MessageOrderAccept, 
+			 realtime.MessageOrderDecline:
+			if message.Data.RequestID == "" {
+				continue
+			}
+
+			processed := h.connections.RespondFromCurrent(
+				riderUID,
+				conn,
+				h.dispatcher,
+				message.Data.OrderID,
+				message.Data.RequestID,
+				message.Type == realtime.MessageOrderAccept,
+			)
+
+			_ = h.connections.SendResponseAck(
+				riderUID,
+				conn,
+				message.Data.OrderID,
+				message.Data.RequestID,
+				processed,
+			)
 		}
 	}
 

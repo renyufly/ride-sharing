@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	appdispatch "ride-sharing/internal/app/dispatch"
+	appmatching "ride-sharing/internal/app/matching"
 	domaindispatch "ride-sharing/internal/domain/dispatch"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/platform/config"
@@ -27,6 +28,7 @@ func RunLive(
 	ctx context.Context,
 	cfg config.Config,
 	factory InputFactory,
+	source appmatching.OrderSource,
 	dispatcher *appdispatch.Service,
 	sender appdispatch.Sender,
 	responseTimeout time.Duration,
@@ -51,7 +53,7 @@ func RunLive(
 	}
 
 	// 创建订单源和matcher
-	prepared, err := factory.Prepare(cfg, nil)
+	prepared, err := factory.Prepare(cfg, source)
 	if err != nil {
 		return LiveResult{}, err
 	}
@@ -97,6 +99,8 @@ func RunLive(
 			sender,
 			prepared.Config.TopK,
 			responseTimeout,
+			prepared.Config.MaxExtraDistanceMeters,
+			prepared.Config.MaxOrdersPerRider,
 		)
 		result.Attempts = append(result.Attempts, attempts...)
 
