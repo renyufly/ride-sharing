@@ -28,6 +28,13 @@ spec:
           #   # Accessing an env variable from the app-config config map
           #   - name: MATCHER_HTTP_ADDR
           env:
+            - name: MATCHER_ASYNC_ORDERS
+              value: "1"
+            - name: MONGODB_URI
+              valueFrom:
+                secretKeyRef:
+                  name: mongodb
+                  key: uri
             - name: MATCHER_INTERNAL_TOKEN
               valueFrom:
                 secretKeyRef:

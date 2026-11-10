@@ -9,11 +9,15 @@ import (
 	"os/signal"
 	"strconv"
 
+	"github.com/google/uuid"
+
+	"ride-sharing/internal/adapter/mongostore"
 	"ride-sharing/internal/adapter/realtime"
 	"ride-sharing/internal/app/dispatch"
 	"ride-sharing/internal/platform/config"
 	runhttp "ride-sharing/internal/transport/http/run"
 	riderws "ride-sharing/internal/transport/ws/rider"
+	"ride-sharing/shared/db"
 	"ride-sharing/shared/env"
 	"syscall"
 	"time"
@@ -65,6 +69,72 @@ func main() {
 	serviceCtx, stopService := context.WithCancel(context.Background())
 	defer stopService()
 
+	internalToken := os.Getenv("MATCHER_INTERNAL_TOKEN")
+	if internalToken == "" {
+		log.Fatal("MATCHER_INTERNAL_TOKEN must be set")
+	}
+
+	if os.Getenv("MATCHER_ASYNC_ORDERS") == "1" {
+		mongoConfig := db.NewMongoDefaultConfig()
+		client, err := db.NewMongoClient(serviceCtx, mongoConfig)
+		if err != nil {
+			log.Fatalf("connect matcher MongoDB: %v", err)
+		}
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := client.Disconnect(ctx); err != nil {
+				log.Printf("disconnect matcher MongoDB: %v", err)
+			}
+		}()
+
+		store := mongostore.NewOrderStore(db.GetDatabase(client, mongoConfig))
+		
+		indexCtx, cancelIndexes := context.WithTimeout(serviceCtx, 20*time.Second)
+		indexErr := store.EnsureIndexes(indexCtx)
+		cancelIndexes()
+		if indexErr != nil {
+			log.Fatalf("create matcher order indexes: %v", indexErr)
+		}
+		
+		runhttp.RegisterScheduledOrderRoutes(mux, store)
+
+		gatewayID := uuid.NewString()
+		mux.Handle("GET /matcher/v2/ws/rider", riderws.NewScheduledHandler(
+			connections, identifyDemoRider, realtimeConfig, gatewayID, store,
+		))
+		mux.Handle(
+			"POST /matcher/v2/live/orders/complete",
+			runhttp.NewCompleteOrderHandler(internalToken, store.CompleteScheduledOrder),
+		)
+
+		
+		processor, err := newScheduledOrderProcessor(
+			store, maxOrdersPerRider, realtimeConfig.ResponseTimeout,
+		)
+		if err != nil {
+			log.Fatalf("create scheduled order processor: %v", err)
+		}
+
+		schedulerDone := make(chan struct{})
+		go func() {
+			defer close(schedulerDone)
+			dispatch.RunScheduler(serviceCtx, store, processor.process)
+		}()
+
+		deliveryDone := make(chan struct{})
+		go func() {
+			defer close(deliveryDone)
+			dispatch.RunOfferDelivery(serviceCtx, gatewayID, store, connections.SendScheduledOffer)
+		}()
+
+		defer func() {
+			stopService()
+			<-schedulerDone
+			<-deliveryDone
+		}()
+	}
+
 	liveHandler := runhttp.NewLiveHandler(
 		dispatcher, connections, 
 		realtimeConfig.ResponseTimeout,
@@ -75,11 +145,6 @@ func main() {
 
 	mux.Handle("POST /matcher/live/demo", liveHandler)
 	mux.HandleFunc("POST /matcher/live/order", liveHandler.Order)
-
-	internalToken := os.Getenv("MATCHER_INTERNAL_TOKEN")
-	if internalToken == "" {
-		log.Fatal("MATCHER_INTERNAL_TOKEN must be set")
-	}
 
 	mux.Handle(
 		"POST /matcher/live/order/complete",

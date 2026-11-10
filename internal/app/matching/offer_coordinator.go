@@ -123,7 +123,8 @@ func (c *offerCoordinator) selectAndQueue(
 		}
 
 		selection, err := chooseOfferCandidate(
-			p.ready,
+			p.ready.order,
+			p.ready.candidates,
 			c.loads,
 			c.reserved,
 			c.uidIndex,

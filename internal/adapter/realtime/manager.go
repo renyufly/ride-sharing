@@ -24,12 +24,14 @@ type Manager struct {
 	mu sync.RWMutex
 	clients map[uint64]*client  // riderUID -> 骑手当前的 WebSocket client
 	writeTimeout time.Duration
+	sessions map[string]*client
 }
 
 func NewManager(writeTimeout time.Duration) *Manager {
 	return &Manager{
 		clients: make(map[uint64]*client),
 		writeTimeout: writeTimeout,
+		sessions: make(map[string]*client),
 	}
 }
 
@@ -100,6 +102,19 @@ func (m *Manager) RespondFromCurrent(
 	return dispatcher.Respond(orderID, riderUID, requestID, accepted)
 }
 
+func (m *Manager) CompleteFromCurrent(
+	riderUID uint64, conn *websocket.Conn, ledger *appdispatch.LiveLedger, orderID uint64,
+) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	current := m.clients[riderUID]
+	if current == nil || current.connect != conn {
+		return errors.New("rider connection is no longer current")
+	}
+	return ledger.Complete(orderID, riderUID)
+}
+
 // 获取所有已登记位置的骑手在线client, 返回位置的snapshot
 func (m *Manager) SnapshotLocations() map[uint64]geo.GeoPoint {
 	m.mu.RLock()
@@ -155,6 +170,7 @@ type orderStatusMessage struct {
     Data struct {
         OrderID uint64                       `json:"orderId"`
         Status  appdispatch.RiderOrderStatus `json:"status"`
+        Error   string                       `json:"error,omitempty"`
     } `json:"data"`
 }
 
@@ -162,6 +178,7 @@ const (
 	MessageOrderRequest = "matcher.order.request"
 	MessageOrderAccept  = "matcher.order.accept"
 	MessageOrderDecline = "matcher.order.decline"
+	MessageOrderComplete = "matcher.order.complete"
 	MessageRiderLocation = "matcher.rider.location"
 	MessageResponseAck = "matcher.order.response_ack"
 	MessageAssignmentConfirmed = "matcher.order.assigned"
@@ -293,6 +310,7 @@ func (m *Manager) SendOrderStatus(
     conn *websocket.Conn,
     orderID uint64,
     status appdispatch.RiderOrderStatus,
+    detail string,
 ) error {
     m.mu.RLock()
     current := m.clients[riderUID]
@@ -319,5 +337,115 @@ func (m *Manager) SendOrderStatus(
     message := orderStatusMessage{Type: MessageOrderStatus}
     message.Data.OrderID = orderID
     message.Data.Status = status
+    message.Data.Error = detail
     return conn.WriteJSON(message)
+}
+
+func (m *Manager) RegisterSession(sessionID string, conn *websocket.Conn) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.sessions[sessionID] = &client{connect: conn}
+}
+
+func (m *Manager) RemoveSession(sessionID string, conn *websocket.Conn) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if current := m.sessions[sessionID]; current != nil && current.connect == conn {
+		delete(m.sessions, sessionID)
+	}
+}
+
+func (m *Manager) writeSessionJSON(
+	ctx context.Context, sessionID string, tryLock bool, messages ...any,
+) error {
+	m.mu.RLock()
+	current := m.sessions[sessionID]
+	m.mu.RUnlock()
+	if current == nil {
+		return errors.New("rider session is offline")
+	}
+
+	if tryLock {
+		if !current.writeMu.TryLock() {
+			return errors.New("rider session writer is busy")
+		}
+	} else {
+		current.writeMu.Lock()
+	}
+	defer current.writeMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	m.mu.RLock()
+	registered := m.sessions[sessionID] == current
+	m.mu.RUnlock()
+	if !registered {
+		return errors.New("rider session is no longer registered")
+	}
+
+	deadline := time.Now().Add(m.writeTimeout)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	if err := current.connect.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+
+	for _, message := range messages {
+		if err := current.connect.WriteJSON(message); err != nil {
+			_ = current.connect.Close()
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) SendScheduledReply(
+	ctx context.Context, sessionID string, orderID uint64,
+	requestID string, processed, accepted bool,
+) error {
+	ack := responseAckMessage{Type: MessageResponseAck}
+	ack.Data.OrderID = orderID
+	ack.Data.RequestID = requestID
+	ack.Data.Processed = processed
+
+	if !processed || !accepted {
+		return m.writeSessionJSON(ctx, sessionID, false, ack)
+	}
+
+	confirmed := assignmentConfirmedMessage{Type: MessageAssignmentConfirmed}
+	confirmed.Data.OrderID = orderID
+	confirmed.Data.RequestID = requestID
+	return m.writeSessionJSON(ctx, sessionID, false, ack, confirmed)
+}
+
+func (m *Manager) SendScheduledOrderStatus(
+	ctx context.Context, sessionID string, orderID uint64,
+	status appdispatch.RiderOrderStatus, detail string,
+) error {
+	message := orderStatusMessage{Type: MessageOrderStatus}
+	message.Data.OrderID = orderID
+	message.Data.Status = status
+	message.Data.Error = detail
+	return m.writeSessionJSON(ctx, sessionID, false, message)
+}
+
+func (m *Manager) SendScheduledOffer(
+	ctx context.Context, sessionID string, offer appdispatch.Offer,
+) error {
+	return m.writeSessionJSON(ctx, sessionID, true, offerMessage{
+		Type: MessageOrderRequest,
+		Data: offerPayload{
+			OrderID:   offer.Order.ID,
+			RequestID: offer.RequestID,
+			Pickup: pickupPayload{
+				Latitude:  offer.Order.Pickup.Latitude,
+				Longitude: offer.Order.Pickup.Longitude,
+			},
+		},
+	})
 }

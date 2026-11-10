@@ -25,8 +25,7 @@ const (
     RiderOrderCompleted RiderOrderStatus = "completed"
 )
 
-// LiveLedger 在同一服务进程的多次实时请求之间共享。
-// 所有字段都由 mu 保护；网络等待期间不得持有 mu。
+// LiveLedger 进程内存账本：能协调当前服务中的并发请求，但服务重启后状态不会保留
 type LiveLedger struct {
 	mu sync.Mutex
 
@@ -53,8 +52,7 @@ func NewLiveLedger() *LiveLedger {
 }
 
 
-// Begin 对一个订单取得进程内派单权。每个订单只调用一次；
-// 拒单后换骑手时不重复调用。
+// Begin 标记订单 orderID 正在派单，避免同时重复派它
 func (l *LiveLedger) Begin(orderID uint64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -73,7 +71,7 @@ func (l *LiveLedger) Begin(orderID uint64) error {
 	return nil
 }
 
-// TryReserve 原子检查容量并预占。
+// TryReserve 临时占用骑手 riderUID 的一个订单名额。(还不算分配成功)
 // 返回 (false, nil) 表示骑手当前没有空余容量。
 func (l *LiveLedger) TryReserve(
 	orderID, riderUID uint64,
@@ -102,7 +100,7 @@ func (l *LiveLedger) TryReserve(
 	return true, nil
 }
 
-// Release 在拒单、超时或发送失败后释放该次预占。
+// Release 骑手拒单、超时或发送失败：还回名额，让系统邀请其他骑手
 func (l *LiveLedger) Release(orderID, riderUID uint64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -123,8 +121,7 @@ func (l *LiveLedger) Release(orderID, riderUID uint64) error {
 	return nil
 }
 
-// Commit 在骑手明确接单后调用。
-// 同一次操作中释放预占、增加已接单量并记录最终分配。
+// Commit 把临时占用变成正式分配，记录“orderID 分给 rider”
 func (l *LiveLedger) Commit(
 	assignment matching.Assignment,
 ) error {
@@ -156,8 +153,7 @@ func (l *LiveLedger) Commit(
 	return nil
 }
 
-// Complete 释放已完成订单占用的骑手容量。(订单完成)
-// 保留 assigned 记录，避免同一订单 ID 被再次派单。
+// Complete 订单完成后，释放正式占用的骑手容量。
 func (l *LiveLedger) Complete(orderID, riderUID uint64) error {
     l.mu.Lock()
     defer l.mu.Unlock()
@@ -237,6 +233,7 @@ func (l *LiveLedger) SnapshotInto(
 	return l.changed, nil
 }
 
+// StatusForRider 骑手重连时查询orderID订单是处理中、已分配还是已完成
 func (l *LiveLedger) StatusForRider(
     orderID, riderUID uint64,
 ) RiderOrderStatus {

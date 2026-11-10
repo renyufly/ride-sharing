@@ -52,7 +52,7 @@ func NewMongoClient(ctx context.Context, cfg *MongoConfig) (*mongo.Client, error
 		return nil, err
 	}
 
-	log.Printf("Successfully connected to MongoDB at %s", cfg.URI)
+	log.Print("Successfully connected to MongoDB")
 	return client, nil
 }
 

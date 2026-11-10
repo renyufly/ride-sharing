@@ -1,13 +1,15 @@
 package run
 
 import (
-    "crypto/subtle"
-    "encoding/json"
-    "errors"
-    "io"
-    "net/http"
+	"context"
+	"crypto/subtle"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"time"
 
-    appdispatch "ride-sharing/internal/app/dispatch"
+	appdispatch "ride-sharing/internal/app/dispatch"
 )
 
 type completeOrderRequest struct {
@@ -15,9 +17,15 @@ type completeOrderRequest struct {
     RiderUID uint64 `json:"riderUid"`
 }
 
-func NewLiveCompleteHandler(
-    ledger *appdispatch.LiveLedger,
-    token string,
+func NewLiveCompleteHandler(ledger *appdispatch.LiveLedger, token string) http.Handler {
+	return NewCompleteOrderHandler(token, func(_ context.Context, orderID, riderUID uint64) error {
+		return ledger.Complete(orderID, riderUID)
+	})
+}
+
+func NewCompleteOrderHandler(
+	token string,
+	complete func(context.Context, uint64, uint64) error,
 ) http.Handler {
     return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
         expected := "Bearer " + token
@@ -53,7 +61,10 @@ func NewLiveCompleteHandler(
             return
         }
 
-        if err := ledger.Complete(request.OrderID, request.RiderUID); err != nil {
+        ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+        defer cancel()
+
+        if err := complete(ctx, request.OrderID, request.RiderUID); err != nil {
             status := http.StatusInternalServerError
             switch {
             case errors.Is(err, appdispatch.ErrOrderNotAssigned):

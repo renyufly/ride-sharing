@@ -1,6 +1,9 @@
 package rider
 
 import (
+	"context"
+	"errors"
+	"log"
 	"net/http"
 	"ride-sharing/internal/adapter/realtime"
 	"ride-sharing/internal/app/dispatch"
@@ -24,6 +27,8 @@ type Handler struct {
 	pingInterval time.Duration
 	pongTimeout time.Duration
 	ledger *dispatch.LiveLedger
+	scheduled  scheduledRiderStore
+	gatewayID string
 }
 
 func NewHandler(
@@ -84,19 +89,42 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 限制单条 WebSocket 消息的最大读取大小
 	conn.SetReadLimit(h.readLimitBytes)
-	// 注册骑手连接
-	h.connections.Register(riderUID, conn)
-	defer func() {
-		h.connections.Remove(riderUID, conn)
-		conn.Close()
-	}()
+	defer conn.Close()
+
+	var route dispatch.RiderSession
+	if h.scheduled == nil {
+		h.connections.Register(riderUID, conn)
+		defer h.connections.Remove(riderUID, conn)
+	} else {
+		var cleanup func()
+		route, cleanup, err = h.registerScheduledSession(r.Context(), riderUID, conn)
+		defer cleanup()
+		if err != nil {
+			log.Printf("register scheduled rider %d: %v", riderUID, err)
+			return
+		}
+	}
 
 	// WebSocket 心跳检测（Heartbeat）
 	if err := conn.SetReadDeadline(time.Now().Add(h.pongTimeout)); err != nil {
 		return
 	}
 	conn.SetPongHandler(func(string) error {
-		return conn.SetReadDeadline(time.Now().Add(h.pongTimeout))
+		validUntil := time.Now().Add(h.pongTimeout)
+		if h.scheduled != nil {
+			ctx, cancel := context.WithTimeout(r.Context(), presenceWriteTimeout)
+			defer cancel()
+
+			current, err := h.scheduled.RenewRiderSession(ctx, route, validUntil)
+			if err != nil {
+				log.Printf("renew scheduled rider %d: %v", riderUID, err)
+				return err
+			}
+			if !current {
+				return errors.New("rider session has been replaced")
+			}
+		}
+		return conn.SetReadDeadline(validUntil)
 	})
 
 	done := make(chan struct{})
@@ -140,12 +168,55 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				Latitude:  message.Data.Location.Latitude,
 				Longitude: message.Data.Location.Longitude,
 			}
+
+			if h.scheduled != nil {
+				if err := geo.ValidatePoint(location); err != nil {
+					continue
+				}
+
+				ctx, cancel := context.WithTimeout(r.Context(), presenceWriteTimeout)
+				current, err := h.scheduled.SaveRiderLocation(ctx, route, location)
+				cancel()
+				if err != nil {
+					log.Printf("save scheduled rider %d location: %v", riderUID, err)
+					return
+				}
+				if !current {
+					return
+				}
+				continue
+			}
+
 			if err := h.connections.UpdateLocation(riderUID, conn, location); err != nil {
 				continue
 			}
 		case realtime.MessageOrderAccept, 
 			 realtime.MessageOrderDecline:
 			if message.Data.RequestID == "" {
+				continue
+			}
+
+			if h.scheduled != nil {
+				orderID := message.Data.OrderID
+				if orderID == 0 {
+					continue
+				}
+				requestID := message.Data.RequestID
+				accepted := message.Type == realtime.MessageOrderAccept
+
+				ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+				processed, err := h.scheduled.RespondToOffer(ctx, route, orderID, requestID, accepted)
+				cancel()
+				if err != nil {
+					log.Printf("respond to scheduled order %d: %v", orderID, err)
+					return
+				}
+
+				if err := h.connections.SendScheduledReply(
+					r.Context(), route.SessionID, orderID, requestID, processed, accepted,
+				); err != nil {
+					return
+				}
 				continue
 			}
 
@@ -166,18 +237,74 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				processed,
 			)
 
+		case realtime.MessageOrderComplete:
+			if message.Data.OrderID == 0 {
+				continue
+			}
+			if err := h.completeOrder(r.Context(), conn, route, riderUID, message.Data.OrderID); err != nil {
+				return
+			}
 		case realtime.MessageOrderStatusQuery:
 			if message.Data.OrderID == 0 {
 				continue
 			}
+
+			if h.scheduled != nil {
+				orderID := message.Data.OrderID
+				ctx, cancel := context.WithTimeout(r.Context(), presenceWriteTimeout)
+				status, err := h.scheduled.ScheduledStatusForRider(ctx, route, orderID)
+				cancel()
+				if err != nil {
+					log.Printf("query scheduled order %d: %v", orderID, err)
+					return
+				}
+
+				if err := h.connections.SendScheduledOrderStatus(
+					r.Context(), route.SessionID, orderID, status, "",
+				); err != nil {
+					return
+				}
+				continue
+			}
+
 			status := h.ledger.StatusForRider(message.Data.OrderID, riderUID)
 			_ = h.connections.SendOrderStatus(
 				riderUID,
 				conn,
 				message.Data.OrderID,
 				status,
+				"",
 			)
 		}
 	}
 
+}
+
+func (h *Handler) completeOrder(
+	ctx context.Context, conn *websocket.Conn, route dispatch.RiderSession, riderUID, orderID uint64,
+) error {
+	var err error
+	if h.scheduled != nil {
+		writeCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		err = h.scheduled.CompleteScheduledOrderForSession(writeCtx, route, orderID)
+		cancel()
+	} else {
+		err = h.connections.CompleteFromCurrent(riderUID, conn, h.ledger, orderID)
+	}
+
+	status := dispatch.RiderOrderCompleted
+	detail := ""
+	if err != nil {
+		status = dispatch.RiderOrderUnknown
+		if errors.Is(err, dispatch.ErrOrderNotAssigned) || errors.Is(err, dispatch.ErrOrderRiderMismatch) {
+			detail = "订单未分配给当前骑手"
+		} else {
+			log.Printf("complete order %d for rider %d: %v", orderID, riderUID, err)
+			detail = "完成订单失败，请重试"
+		}
+	}
+	if h.scheduled != nil {
+		return h.connections.SendScheduledOrderStatus(ctx, route.SessionID, orderID, status, detail)
+	}
+	return h.connections.SendOrderStatus(riderUID, conn, orderID, status, detail)
 }

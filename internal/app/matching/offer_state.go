@@ -5,6 +5,7 @@ import (
 	"math"
 
 	domainmatching "ride-sharing/internal/domain/matching"
+	"ride-sharing/internal/domain/order"
 )
 
 // pendingOffer 一个尚未结束的订单邀请流程 (记录所有分配尝试)
@@ -87,7 +88,8 @@ func scanOfferCandidates(
 
 // chooseOfferCandidate 只负责选择骑手
 func chooseOfferCandidate(
-	ready *candidateResult,
+	currentOrder order.Order,
+	candidates []domainmatching.Candidate,
 	loads []uint64,
 	reserved []uint64,
 	uidIndex map[uint64]int,
@@ -95,11 +97,11 @@ func chooseOfferCandidate(
 	maxExtraDistanceMeters float64,
 	maxOrdersPerRider int,
 ) (balancedSelection, error) {
-	if len(ready.candidates) == 0 {
+	if len(candidates) == 0 {
 		return balancedSelection{}, nil
 	}
 
-	nearestSquared := ready.candidates[0].DistanceSquaredMeters
+	nearestSquared := candidates[0].DistanceSquaredMeters
 	maxDistanceSquared := nearestSquared
 	if maxExtraDistanceMeters > 0 {
 		extra := maxExtraDistanceMeters
@@ -107,7 +109,7 @@ func chooseOfferCandidate(
 	}
 
 	input := offerScanInput{
-		candidates:         ready.candidates,
+		candidates:         candidates,
 		maxDistanceSquared: maxDistanceSquared,
 		loads:              loads,
 		reserved:           reserved,
@@ -149,8 +151,8 @@ func chooseOfferCandidate(
 
 	return balancedSelection{
 		assignment: domainmatching.Assignment{
-			OrderID:               ready.order.ID,
-			Sequence:              ready.order.Sequence,
+			OrderID:               currentOrder.ID,
+			Sequence:              currentOrder.Sequence,
 			RiderUID:              selected.candidate.RiderUID,
 			DistanceSquaredMeters: selected.candidate.DistanceSquaredMeters,
 		},

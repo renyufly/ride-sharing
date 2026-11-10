@@ -39,34 +39,10 @@ func (s *oneOrderSource) Next() (order.Order, bool, error) {
 }
 
 func (h *LiveHandler) Order(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
-	decoder := json.NewDecoder(r.Body)
-	decoder.DisallowUnknownFields()
-
-	var request LiveOrderRequest
-	if err := decoder.Decode(&request); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
-		return
-	}
-	var extra struct{}
-	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{
-			Error: "request body must contain one JSON object",
-		})
-		return
-	}
-
-	pickup := geo.GeoPoint{
-		Latitude:  request.Pickup.Latitude,
-		Longitude: request.Pickup.Longitude,
-	}
-	if request.OrderID == 0 ||
-		request.TopK <= 0 ||
-		request.MaxExtraDistanceMeters < 0 ||
-		!geo.SanFranciscoBounds.Contains(pickup) {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{
-			Error: "invalid orderId, topK, distance limit or pickup",
-		})
+	
+	request, pickup, err := decodeLiveOrderRequest(w, r)
+	if err != nil {
+		_ = writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
 	}
 
@@ -136,4 +112,31 @@ func (h *LiveHandler) Order(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, result)
+}
+
+func decodeLiveOrderRequest(
+	w http.ResponseWriter, r *http.Request,
+) (LiveOrderRequest, geo.GeoPoint, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4<<10)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	var req LiveOrderRequest
+	if err := decoder.Decode(&req); err != nil {
+		return req, geo.GeoPoint{}, err
+	}
+	var extra struct{}
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return req, geo.GeoPoint{}, errors.New("request body must contain one JSON object")
+	}
+
+	pickup := geo.GeoPoint{
+		Latitude:  req.Pickup.Latitude,
+		Longitude: req.Pickup.Longitude,
+	}
+	if req.OrderID == 0 || req.TopK <= 0 || req.MaxExtraDistanceMeters < 0 ||
+		!geo.SanFranciscoBounds.Contains(pickup) {
+		return req, pickup, errors.New("invalid orderId, topK, distance limit or pickup")
+	}
+	return req, pickup, nil
 }
