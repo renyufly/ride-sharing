@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"ride-sharing/internal/adapter/simulation/runsetup"
+	appdispatch "ride-sharing/internal/app/dispatch"
 	apprun "ride-sharing/internal/app/run"
 	"ride-sharing/internal/domain/geo"
 	"ride-sharing/internal/domain/order"
@@ -111,18 +112,28 @@ func (h *LiveHandler) Order(w http.ResponseWriter, r *http.Request) {
 	cfg.ArrivalWindow = time.Second
 	cfg.RunTimeout = 2 * time.Minute
 
+	cfg.MaxOrdersPerRider = h.maxOrdersPerRider
+
 	result, err := apprun.RunLive(
-		r.Context(),
+		h.orderContext,
 		cfg,
 		runsetup.Factory{RiderLocations: locations},
 		source,
 		h.dispatcher,
 		h.sender,
 		h.responseTimeout,
+		h.ledger,
 	)
+	
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+		status := http.StatusInternalServerError
+		if errors.Is(err, appdispatch.ErrOrderAlreadyAssigned) ||
+			errors.Is(err, appdispatch.ErrOrderInProgress) {
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, ErrorResponse{Error: err.Error()})
 		return
 	}
+
 	writeJSON(w, http.StatusOK, result)
 }

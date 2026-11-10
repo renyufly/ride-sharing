@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	domaindispatch "ride-sharing/internal/domain/dispatch"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
@@ -152,6 +153,7 @@ type balancedSelection struct {
 	riderIndex       int
 	assigned         bool   // true：成功找到骑手 false：候选骑手都达到额度
 	capacityFiltered uint64 // 本单因为满额而跳过了多少名候选骑手
+	blockedByReservation bool  
 }
 
 // 一个 Batch 包含多个订单
@@ -184,6 +186,7 @@ type coordinatorResult struct {
 	deferredByWindow          uint64
 	deferredPreview           []DeferredOrder
 	capacityFiltered          uint64
+	attempts 				  []domaindispatch.Attempt
 }
 
 type CandidatePanicError struct {
@@ -198,11 +201,6 @@ func (e *CandidatePanicError) Error() string {
 	return fmt.Sprintf("candidate worker %d panicked on order ID %d sequence %d: %v\n%s", e.WorkerID, e.OrderID, e.Sequence, e.Recovered, e.Stack)
 }
 
-// RunBalanced:
-// Producer：生成订单并组装 Batch
-// -> batchChannel：批量订单队列 (Worker1, Worker2...)
-// -> candidateChannel：候选结果队列
-// -> Coordinator：按 Sequence 顺序分配 (选择骑手 → 更新 loads → 统计结果)
 func RunBalanced(
 	ctx context.Context,
 	source OrderSource,
@@ -210,6 +208,51 @@ func RunBalanced(
 	riders []rider.Rider,
 	options BalancedOptions,
 	deferredSink DeferredOrderSink,
+) (Result, error) {
+	return runBalanced(
+		ctx, source, matcher, riders, options, deferredSink, nil, nil,
+	)
+}
+
+func RunBalancedWithOffers(
+	ctx context.Context,
+	source OrderSource,
+	matcher CandidateMatcher,
+	riders []rider.Rider,
+	options BalancedOptions,
+	deferredSink DeferredOrderSink,
+	confirmer OfferConfirmer,
+	ledger OfferLedger,
+) (Result, error) {
+	if confirmer == nil {
+		return Result{}, errors.New("offer confirmer cannot be nil")
+	}
+	if deferredSink == nil {
+		return Result{}, errors.New("deferred sink cannot be nil")
+	}
+	if ledger == nil {
+		return Result{}, errors.New("offer ledger cannot be nil")
+	}
+
+	return runBalanced(
+		ctx, source, matcher, riders, options, deferredSink, confirmer, ledger,
+	)
+}
+
+// runBalanced:
+// Producer：生成订单并组装 Batch
+// -> batchChannel：批量订单队列 (Worker1, Worker2...)
+// -> candidateChannel：候选结果队列
+// -> Coordinator：按 Sequence 顺序分配 (选择骑手 → 更新 loads → 统计结果)
+func runBalanced(
+	ctx context.Context,
+	source OrderSource,
+	matcher CandidateMatcher,
+	riders []rider.Rider,
+	options BalancedOptions,
+	deferredSink DeferredOrderSink,
+	confirmer OfferConfirmer,
+	ledger OfferLedger,
 ) (Result, error) {
 	if ctx == nil {
 		return Result{}, errors.New("context cannot be nil")
@@ -255,10 +298,35 @@ func RunBalanced(
 	coordinatorResults := make(chan coordinatorResult, 1)
 
 	// 启动一个 Producer: 生成订单、控制到达时间、组装 Batch
-	go produceBalanced(runContext, cancel, runStarted, source, batchChannel, batchPool, candidatePool, options.Options, producerResults)
+	go produceBalanced(runContext, cancel, runStarted, source, 
+		batchChannel, batchPool, candidatePool, options.Options, 
+		producerResults)
 
 	// 启动一个 Coordinator: 最终骑手选择和订单量统计
-	go coordinateBalanced(runContext, cancel, runStarted, candidateChannel, candidatePool, riders, options, coordinatorResults, deferredSink)
+	var offers *offerPool
+
+	if confirmer == nil {
+		go coordinateBalanced(
+			runContext, cancel, runStarted,
+			candidateChannel, candidatePool,
+			riders, options, coordinatorResults, deferredSink,
+		)
+	} else {
+		offers = startOfferPool(
+			runContext,
+			confirmer,
+			options.Workers,
+			options.ChannelCapacity,
+		)
+		go coordinateBalancedOffers(
+			runContext, cancel, runStarted,
+			candidateChannel, candidatePool,
+			riders, options,
+			offers.jobs, offers.results,
+			coordinatorResults, deferredSink,
+			ledger,
+		)
+	}
 
 	// 启动多个 Worker
 	var workers sync.WaitGroup
@@ -275,7 +343,16 @@ func RunBalanced(
 	// 等待所有 Worker 结束
 	workers.Wait()
 	close(candidateChannel)
+
 	coordinatorState := <-coordinatorResults
+
+	if offers != nil {
+		if coordinatorState.err != nil {
+			cancel()
+		}
+		offers.stop()
+	}
+
 	close(workerResults)
 
 	workerStates := make([]candidateWorkerResult, 0, options.Workers)
@@ -292,6 +369,11 @@ func RunBalanced(
 		}
 	}
 
+	reportSummary := report.Summary{}
+	if coordinatorState.reporter != nil {
+		reportSummary = coordinatorState.reporter.Summary()
+	}
+
 	// 汇总统计数据和错误信息
 	result := Result{
 		GeneratedOrders:      producerState.generated,
@@ -303,7 +385,7 @@ func RunBalanced(
 		WorkerCompleted:      workerCompleted,
 		OrderPreview:         append([]order.Order(nil), producerState.preview...),
 		AssignmentPreview:    append([]matching.Assignment(nil), coordinatorState.preview...),
-		Report:               coordinatorState.reporter.Summary(),
+		Report: 			  reportSummary,
 		Performance:          buildPerformanceMetrics(producerState, coordinatorState.lastCompletionNs, coordinatorState.queueMatchLatency, coordinatorState.endToEndLatency),
 		StrategyDetails: &StrategyMetrics{
 			TopK:                     options.TopK,
@@ -319,6 +401,7 @@ func RunBalanced(
 		DeferredPreview:            coordinatorState.deferredPreview,
 		MaxOrdersPerRider:          options.MaxOrdersPerRider,
 		CapacityFilteredCandidates: coordinatorState.capacityFiltered,
+		Attempts: 				    append([]domaindispatch.Attempt(nil),coordinatorState.attempts...,),
 	}
 
 	result.GeneratedWithinWindow = producerState.generatedWithinWindow

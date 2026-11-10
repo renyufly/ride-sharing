@@ -27,6 +27,12 @@ spec:
           # env:
           #   # Accessing an env variable from the app-config config map
           #   - name: MATCHER_HTTP_ADDR
+          env:
+            - name: MATCHER_INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: matcher-internal
+                  key: token
 
 ---
 apiVersion: v1

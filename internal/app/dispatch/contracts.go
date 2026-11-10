@@ -20,3 +20,11 @@ type Offer struct {
 type Sender interface {
 	SendOffer(ctx context.Context, riderUID uint64, offer Offer) error
 }
+
+type AssignmentNotifier interface {
+    SendAssignmentConfirmed(
+        ctx context.Context,
+        riderUID, orderID uint64,
+        requestID string,
+    ) error
+}

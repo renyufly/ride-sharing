@@ -40,6 +40,7 @@ func main() {
 
 	connections := realtime.NewManager(realtimeConfig.WriteTimeout)
 	dispatcher := dispatch.NewService()
+	ledger := dispatch.NewLiveLedger()
 
 	mux.Handle("GET /matcher/ws/rider", riderws.NewHandler(
 		connections,
@@ -49,13 +50,41 @@ func main() {
 		realtimeConfig.WriteTimeout,
 		realtimeConfig.PingInterval,
 		realtimeConfig.PongTimeout,
+		ledger,
 	))
 
+	maxOrdersPerRider := 0
+	if raw, ok := os.LookupEnv("MATCHER_MAX_ORDERS_PER_RIDER"); ok {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 0 {
+			log.Fatalf("invalid MATCHER_MAX_ORDERS_PER_RIDER: %q", raw)
+		}
+		maxOrdersPerRider = value
+	}
+
+	serviceCtx, stopService := context.WithCancel(context.Background())
+	defer stopService()
+
 	liveHandler := runhttp.NewLiveHandler(
-		dispatcher, connections, realtimeConfig.ResponseTimeout,
+		dispatcher, connections, 
+		realtimeConfig.ResponseTimeout,
+		ledger,
+		maxOrdersPerRider,
+		serviceCtx,
 	)
+
 	mux.Handle("POST /matcher/live/demo", liveHandler)
 	mux.HandleFunc("POST /matcher/live/order", liveHandler.Order)
+
+	internalToken := os.Getenv("MATCHER_INTERNAL_TOKEN")
+	if internalToken == "" {
+		log.Fatal("MATCHER_INTERNAL_TOKEN must be set")
+	}
+
+	mux.Handle(
+		"POST /matcher/live/order/complete",
+		runhttp.NewLiveCompleteHandler(ledger, internalToken),
+	)
 
 	server := &http.Server{
 		Addr:              httpAddr,
@@ -86,7 +115,7 @@ func main() {
 	case sig := <-shutdown:
 		log.Printf("Server is shutting down due to %v signal", sig)
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 140*time.Second)
 		defer cancel()
 
 		if err := server.Shutdown(ctx); err != nil {

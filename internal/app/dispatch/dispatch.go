@@ -14,6 +14,77 @@ import (
 
 var ErrNoRiderAccepted = errors.New("no candidate rider accepted the order")
 
+
+// OfferOne 邀请一位骑手，返回这次邀请的最终状态 (拒单、超时和发送失败)。
+func (s *Service) OfferOne(
+	ctx context.Context,
+	currentOrder order.Order,
+	riderUID uint64,
+	sender Sender,
+	responseTimeout time.Duration,
+) (domaindispatch.Attempt, error) {
+	if responseTimeout <= 0 {
+		return domaindispatch.Attempt{}, errors.New("response timeout must be positive")
+	}
+	if err := ctx.Err(); err != nil {
+		return domaindispatch.Attempt{}, err
+	}
+
+	attempt := domaindispatch.Attempt{
+		OrderID:   currentOrder.ID,
+		RiderUID:  riderUID,
+		RequestID: uuid.NewString(),
+		Status:    domaindispatch.StatusPending,
+	}
+
+	reply := s.register(currentOrder.ID, riderUID, attempt.RequestID)
+
+	err := sender.SendOffer(ctx, riderUID, Offer{
+		Order:     currentOrder,
+		RequestID: attempt.RequestID,
+	})
+	if err != nil {
+		if s.expire(attempt.RequestID) {
+			attempt.Status = domaindispatch.StatusDeliveryFailed
+			return attempt, nil
+		}
+
+		if <-reply {
+			attempt.Status = domaindispatch.StatusAccepted
+		} else {
+			attempt.Status = domaindispatch.StatusDeclined
+		}
+		return attempt, nil
+	}
+
+	timer := time.NewTimer(responseTimeout)
+	defer timer.Stop()
+
+	var accepted bool
+	select {
+	case accepted = <-reply:
+	case <-timer.C:
+		if s.expire(attempt.RequestID) {
+			attempt.Status = domaindispatch.StatusTimedOut
+			return attempt, nil
+		}
+		accepted = <-reply
+	case <-ctx.Done():
+		if s.expire(attempt.RequestID) {
+			return attempt, ctx.Err()
+		}
+		accepted = <-reply
+	}
+
+	if accepted {
+		attempt.Status = domaindispatch.StatusAccepted
+	} else {
+		attempt.Status = domaindispatch.StatusDeclined
+	}
+	return attempt, nil
+}
+
+
 // Dispatch 向候选骑手发起接单邀请。
 //
 // 该方法首先查找距离订单最近的 topK 名骑手，然后依次发送邀请。
@@ -21,7 +92,6 @@ var ErrNoRiderAccepted = errors.New("no candidate rider accepted the order")
 // 如果骑手拒单、超时或邀请发送失败，则继续尝试下一位骑手。
 //
 // 参数：
-//   - ctx：控制派单流程的取消及整体生命周期。
 //   - order：需要派单的订单。
 //   - finder：用于查找候选骑手的接口。
 //   - sender：用于发送接单邀请的接口。
@@ -90,66 +160,24 @@ func (s *Service) Dispatch(ctx context.Context, order order.Order,
 				return matching.Assignment{}, attempts, err
 			}
 
-			requestID := uuid.NewString()
-			attempt := domaindispatch.Attempt{
-				OrderID: order.ID,
-				RiderUID: candidate.RiderUID,
-				RequestID: requestID,
-				Status: domaindispatch.StatusPending,
-			}
-
-			// 登记等待中的接单请求
-			reply := s.register(attempt.OrderID, attempt.RiderUID, requestID)
-
-			// 向骑手发送接单邀请
-			sendErr := sender.SendOffer(ctx, attempt.RiderUID, Offer{
-				Order:     order,
-				RequestID: requestID,
-			})
-
-			var accepted bool
-			if sendErr != nil {
-				if s.expire(requestID) {
-					attempt.Status = domaindispatch.StatusDeliveryFailed
-					attempts = append(attempts, attempt)
-					continue
-				}
-				accepted = <-reply
-			} else {
-				timer := time.NewTimer(responseTimeOut)
-
-				select {
-				case accepted = <-reply:
-					timer.Stop()
-
-				case <-timer.C:
-					if s.expire(requestID) {
-						attempt.Status = domaindispatch.StatusTimedOut
-						attempts = append(attempts, attempt)
-						continue
-					}
-					accepted = <-reply
-
-				case <-ctx.Done():
-					timer.Stop()
-					if s.expire(requestID) {
-						return matching.Assignment{}, attempts, ctx.Err()
-					}
-					accepted = <-reply
-				}
-			}
-
-			if (!accepted) {
-				attempt.Status = domaindispatch.StatusDeclined
-				
+			attempt, err := s.OfferOne(
+				ctx,
+				order,
+				candidate.RiderUID,
+				sender,
+				responseTimeOut,
+			)
+			if attempt.RequestID != "" {
 				attempts = append(attempts, attempt)
+			}
+			if err != nil {
+				return matching.Assignment{}, attempts, err
+			}
+			if attempt.Status != domaindispatch.StatusAccepted {
 				continue
 			}
-
-			// accepted == true
-			attempt.Status = domaindispatch.StatusAccepted
-			attempts = append(attempts, attempt)
-
+			
+			
 			assignment := matching.Assignment{
 				OrderID:               order.ID,
 				Sequence:              order.Sequence,

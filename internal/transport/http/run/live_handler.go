@@ -1,6 +1,7 @@
 package run
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -15,27 +16,37 @@ import (
 )
 
 type LiveHandler struct {
-	dispatcher      *appdispatch.Service
-	sender          liveSender
-	responseTimeout time.Duration
+	dispatcher        *appdispatch.Service
+	sender            liveSender
+	responseTimeout   time.Duration
+	ledger            *appdispatch.LiveLedger
+	maxOrdersPerRider int
+	orderContext      context.Context
 }
 
 func NewLiveHandler(
 	dispatcher *appdispatch.Service,
 	sender liveSender,
 	responseTimeout time.Duration,
+	ledger *appdispatch.LiveLedger,
+	maxOrdersPerRider int,
+	orderContext context.Context,
 ) *LiveHandler {
 	return &LiveHandler{
-		dispatcher:      dispatcher,
-		sender:          sender,
-		responseTimeout: responseTimeout,
+		dispatcher:        dispatcher,
+		sender:            sender,
+		responseTimeout:   responseTimeout,
+		ledger:            ledger,
+		maxOrdersPerRider: maxOrdersPerRider,
+		orderContext:      orderContext,
 	}
 }
 
 type LiveRequest struct {
-	TopK       int   `json:"topK"`
-	Seed       int64 `json:"seed"`
+	TopK                   int     `json:"topK"`
+	Seed                   int64   `json:"seed"`
 	OrderCount             int     `json:"orderCount"`
+	BatchSize              int     `json:"batchSize"`
 	MaxExtraDistanceMeters float64 `json:"maxExtraDistanceMeters"`
 	MaxOrdersPerRider      int     `json:"maxOrdersPerRider"`
 }
@@ -76,10 +87,19 @@ func (h *LiveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if request.BatchSize < 0 || request.BatchSize > 4 {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{
+			Error: "batchSize must be between 1 and 4 when provided",
+		})
+		return
+	}
 
 	cfg := config.Default()
 	cfg.RiderCount = len(locations)
 	cfg.OrderCount = request.OrderCount
+	if request.BatchSize > 0 {
+		cfg.BatchSize = request.BatchSize
+	}
 	cfg.Seed = request.Seed
 	cfg.Strategy = config.StrategyBalanced
 	cfg.TopK = request.TopK
@@ -94,11 +114,12 @@ func (h *LiveHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	result, err := apprun.RunLive(
 		r.Context(),
 		cfg,
-		runsetup.Factory{RiderLocations: locations},  // runsetup.Factory{},
+		runsetup.Factory{RiderLocations: locations},
 		nil,
 		h.dispatcher,
 		h.sender,
 		h.responseTimeout,
+		h.ledger,
 	)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})

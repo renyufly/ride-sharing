@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	domaindispatch "ride-sharing/internal/domain/dispatch"
 	"ride-sharing/internal/domain/matching"
 	"ride-sharing/internal/domain/order"
 	"ride-sharing/internal/domain/rider"
@@ -83,6 +84,7 @@ type Result struct {
 	DeferredPreview            []DeferredOrder       `json:"deferredPreview"`
 	MaxOrdersPerRider          int                   `json:"maxOrdersPerRider"`
 	CapacityFilteredCandidates uint64                `json:"capacityFilteredCandidates"`
+	Attempts 				   []domaindispatch.Attempt `json:"attempts,omitempty"`
 }
 
 type StrategyMetrics struct {

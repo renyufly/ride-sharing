@@ -142,12 +142,31 @@ type responseAckMessage struct {
 	} `json:"data"`
 }
 
+type assignmentConfirmedMessage struct {
+    Type string `json:"type"`
+    Data struct {
+        OrderID   uint64 `json:"orderId"`
+        RequestID string `json:"requestId"`
+    } `json:"data"`
+}
+
+type orderStatusMessage struct {
+    Type string `json:"type"`
+    Data struct {
+        OrderID uint64                       `json:"orderId"`
+        Status  appdispatch.RiderOrderStatus `json:"status"`
+    } `json:"data"`
+}
+
 const (
 	MessageOrderRequest = "matcher.order.request"
 	MessageOrderAccept  = "matcher.order.accept"
 	MessageOrderDecline = "matcher.order.decline"
 	MessageRiderLocation = "matcher.rider.location"
 	MessageResponseAck = "matcher.order.response_ack"
+	MessageAssignmentConfirmed = "matcher.order.assigned"
+	MessageOrderStatusQuery = "matcher.order.status_query"
+    MessageOrderStatus      = "matcher.order.status"
 )
 
 // SendOffer 向指定骑手发送派单邀请
@@ -201,15 +220,22 @@ func (m *Manager) SendResponseAck(
 	processed bool,
 ) error {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
 	current := m.clients[riderUID]
 	if current == nil || current.connect != conn {
+		m.mu.RUnlock()
 		return errors.New("rider connection is no longer current")
 	}
+	m.mu.RUnlock()
 
 	current.writeMu.Lock()
 	defer current.writeMu.Unlock()
+
+	m.mu.RLock()
+	stillCurrent := m.clients[riderUID] == current
+	m.mu.RUnlock()
+	if !stillCurrent {
+		return errors.New("rider connection is no longer current")
+	}
 
 	if err := conn.SetWriteDeadline(time.Now().Add(m.writeTimeout)); err != nil {
 		return err
@@ -219,6 +245,79 @@ func (m *Manager) SendResponseAck(
 	message.Data.OrderID = orderID
 	message.Data.RequestID = requestID
 	message.Data.Processed = processed
-
 	return conn.WriteJSON(message)
+}
+
+func (m *Manager) SendAssignmentConfirmed(
+    ctx context.Context,
+    riderUID, orderID uint64,
+    requestID string,
+) error {
+    if err := ctx.Err(); err != nil {
+        return err
+    }
+
+    m.mu.RLock()
+    current := m.clients[riderUID]
+    m.mu.RUnlock()
+    if current == nil {
+        return errors.New("rider is offline")
+    }
+
+    current.writeMu.Lock()
+    defer current.writeMu.Unlock()
+
+    m.mu.RLock()
+    stillCurrent := m.clients[riderUID] == current
+    m.mu.RUnlock()
+    if !stillCurrent {
+        return errors.New("rider connection is no longer current")
+    }
+
+    deadline := time.Now().Add(m.writeTimeout)
+    if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+        deadline = ctxDeadline
+    }
+    if err := current.connect.SetWriteDeadline(deadline); err != nil {
+        return err
+    }
+
+    message := assignmentConfirmedMessage{Type: MessageAssignmentConfirmed}
+    message.Data.OrderID = orderID
+    message.Data.RequestID = requestID
+    return current.connect.WriteJSON(message)
+}
+
+func (m *Manager) SendOrderStatus(
+    riderUID uint64,
+    conn *websocket.Conn,
+    orderID uint64,
+    status appdispatch.RiderOrderStatus,
+) error {
+    m.mu.RLock()
+    current := m.clients[riderUID]
+    if current == nil || current.connect != conn {
+        m.mu.RUnlock()
+        return errors.New("rider connection is no longer current")
+    }
+    m.mu.RUnlock()
+
+    current.writeMu.Lock()
+    defer current.writeMu.Unlock()
+
+    m.mu.RLock()
+    stillCurrent := m.clients[riderUID] == current
+    m.mu.RUnlock()
+    if !stillCurrent {
+        return errors.New("rider connection is no longer current")
+    }
+
+    if err := conn.SetWriteDeadline(time.Now().Add(m.writeTimeout)); err != nil {
+        return err
+    }
+
+    message := orderStatusMessage{Type: MessageOrderStatus}
+    message.Data.OrderID = orderID
+    message.Data.Status = status
+    return conn.WriteJSON(message)
 }

@@ -23,6 +23,7 @@ type Handler struct {
 	writeTimeout time.Duration
 	pingInterval time.Duration
 	pongTimeout time.Duration
+	ledger *dispatch.LiveLedger
 }
 
 func NewHandler(
@@ -33,6 +34,7 @@ func NewHandler(
 	writeTimeout time.Duration,
 	pingInterval time.Duration,
 	pongTimeout time.Duration,
+	ledger *dispatch.LiveLedger,
 ) *Handler {
 	return &Handler{
 		connections: connections,
@@ -48,6 +50,7 @@ func NewHandler(
 		writeTimeout: writeTimeout,
 		pingInterval: pingInterval,
 		pongTimeout: pongTimeout,
+		ledger: ledger,
 	}
 }
 
@@ -161,6 +164,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				message.Data.OrderID,
 				message.Data.RequestID,
 				processed,
+			)
+
+		case realtime.MessageOrderStatusQuery:
+			if message.Data.OrderID == 0 {
+				continue
+			}
+			status := h.ledger.StatusForRider(message.Data.OrderID, riderUID)
+			_ = h.connections.SendOrderStatus(
+				riderUID,
+				conn,
+				message.Data.OrderID,
+				status,
 			)
 		}
 	}

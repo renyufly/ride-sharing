@@ -1,10 +1,14 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
+import type { MapOrder } from "./LiveDispatchMap";
+
+const LiveDispatchMap = dynamic(() => import("./LiveDispatchMap").then((module) => module.LiveDispatchMap), { ssr: false });
 
 type Pickup = { latitude: number; longitude: number };
-type Offer = { orderId: number; requestId: string; pickup: Pickup };
-type RiderState = { connected: boolean; offer: Offer | null; message: string };
+type Offer = { orderId: number; requestId: string; pickup: Pickup; receivedAt: number };
+type RiderState = { connected: boolean; offers: Offer[]; message: string };
 type LiveResult = {
   InputCount: number;
   AcceptedCount: number;
@@ -14,19 +18,48 @@ type LiveResult = {
     RiderUID: number;
     RequestID: string;
     Status: string;
-  }>;
-  Assignments: Array<{ OrderID: number; RiderUID: number }>;
+  }> | null;
+  Assignments: Array<{ OrderID: number; RiderUID: number }> | null;
+  orders?: Array<{ ID: number; Pickup: { Latitude: number; Longitude: number } }> | null;
+  pipeline?: {
+    candidateWorkers: number;
+    offerWorkers: number;
+    batchSize: number;
+    batchPoolCapacity: number;
+    candidatePoolCapacity: number;
+    topK: number;
+    candidateWorkerCompleted: number[] | null;
+    maxCandidateQueueDepth: number;
+    maxReorderDepth: number;
+  };
 };
 
-const RIDERS = [
-  { uid: 101, location: { latitude: 37.775, longitude: -122.4195 } },
-  { uid: 102, location: { latitude: 37.776, longitude: -122.4205 } },
-] as const;
+type Activity = { id: number; time: string; text: string };
+type SocketMessage = { type: string; data?: {
+  orderId?: number; requestId?: string; pickup?: Pickup;
+  processed?: boolean; status?: string;
+} };
 
-const INITIAL_RIDERS: Record<number, RiderState> = {
-  101: { connected: false, offer: null, message: "未连接" },
-  102: { connected: false, offer: null, message: "未连接" },
-};
+type PlacedRider = { uid: number; location: Pickup };
+const BOUNDS = { minLatitude: 37.70, maxLatitude: 37.82, minLongitude: -122.52, maxLongitude: -122.35 };
+
+const RESPONSE_WINDOW_MS = 15_000;
+
+function attemptLabel(status: string): string {
+  switch (status) {
+    case "accepted": return "接单成功，已提交";
+    case "declined": return "拒单，释放预占并重派";
+    case "timed_out": return "超时，释放预占并重派";
+    case "delivery_failed": return "投递失败，释放预占并重派";
+    default: return status;
+  }
+}
+
+function newOrderId(): number {
+  const parts = new Uint32Array(2);
+  window.crypto.getRandomValues(parts);
+  return ((parts[0] & 0x1fffff) * 0x100000000 + parts[1]) || 1;
+}
 
 function socketUrl(uid: number): string {
   const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -40,7 +73,24 @@ function socketUrl(uid: number): string {
 
 export function LiveDispatchDemo() {
   const sockets = useRef(new Map<number, WebSocket>());
-  const [riders, setRiders] = useState(INITIAL_RIDERS);
+  const knownOrders = useRef(new Map<number, Set<number>>());
+  const sentResponses = useRef(new Map<string, "accept" | "decline">());
+  const confirmedRequests = useRef(new Set<string>());
+  const nextActivityId = useRef(0);
+  const nextRiderUid = useRef(101);
+  const [riders, setRiders] = useState<Record<number, RiderState>>({});
+  const [placedRiders, setPlacedRiders] = useState<PlacedRider[]>([]);
+  const [targetCount, setTargetCount] = useState(6);
+  const [placementEnabled, setPlacementEnabled] = useState(true);
+  const [orders, setOrders] = useState<MapOrder[]>([]);
+  const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+  const [topK, setTopK] = useState(3);
+  const [activity, setActivity] = useState<Activity[]>([]);
+  const [clock, setClock] = useState(Date.now());
+  const [runKind, setRunKind] = useState<"single" | "batch">("batch");
+  const [batchCount, setBatchCount] = useState(4);
+  const [batchSize, setBatchSize] = useState(2);
+  const [capacity, setCapacity] = useState(0);
   const [pickup, setPickup] = useState<Pickup>({
     latitude: 37.7749,
     longitude: -122.4194,
@@ -51,17 +101,83 @@ export function LiveDispatchDemo() {
 
   useEffect(() => {
     const activeSockets = sockets.current;
+    const timer = window.setInterval(() => setClock(Date.now()), 1000);
     return () => {
+      window.clearInterval(timer);
       for (const socket of activeSockets.values()) socket.close();
       activeSockets.clear();
     };
   }, []);
+
+  function addActivity(text: string) {
+    const item = { id: ++nextActivityId.current, time: new Date().toLocaleTimeString(), text };
+    setActivity((current) => [...current.slice(-39), item]);
+  }
+
+  function rememberOrder(uid: number, orderId: number) {
+    const orders = knownOrders.current.get(uid) ?? new Set<number>();
+    orders.add(orderId);
+    if (orders.size > 20) orders.delete(orders.values().next().value!);
+    knownOrders.current.set(uid, orders);
+  }
 
   function updateRider(uid: number, change: Partial<RiderState>) {
     setRiders((current) => ({
       ...current,
       [uid]: { ...current[uid], ...change },
     }));
+  }
+
+  function addRider(location: Pickup) {
+    if (placedRiders.length >= targetCount || isSubmitting) return;
+    if (location.latitude < BOUNDS.minLatitude || location.latitude > BOUNDS.maxLatitude ||
+        location.longitude < BOUNDS.minLongitude || location.longitude > BOUNDS.maxLongitude) {
+      setError("请在旧金山演示区域内放置骑手");
+      return;
+    }
+    const uid = nextRiderUid.current++;
+    setPlacedRiders((current) => [...current, { uid, location }]);
+    setRiders((current) => ({ ...current, [uid]: { connected: false, offers: [], message: "未连接" } }));
+    setError(null);
+  }
+
+  function generateRemaining() {
+    if (isSubmitting) return;
+    const count = Math.max(0, targetCount - placedRiders.length);
+    const generated: PlacedRider[] = Array.from({ length: count }, () => ({
+      uid: nextRiderUid.current++,
+      location: {
+        latitude: 37.715 + Math.random() * 0.09,
+        longitude: -122.505 + Math.random() * 0.14,
+      },
+    }));
+    setPlacedRiders((current) => [...current, ...generated]);
+    setRiders((current) => ({ ...current, ...Object.fromEntries(generated.map(({ uid }) => [uid, { connected: false, offers: [], message: "未连接" }])) }));
+    setPlacementEnabled(false);
+    addActivity(`已生成 ${generated.length} 位骑手；请逐个连接需要参与匹配的骑手`);
+  }
+
+  function disconnectRider(uid: number) {
+    const socket = sockets.current.get(uid);
+    if (!socket) return;
+    updateRider(uid, { message: "正在主动退出连接…" });
+    socket.close();
+  }
+
+  function resetRiders() {
+    if (isSubmitting) return;
+    for (const socket of sockets.current.values()) socket.close();
+    sockets.current.clear();
+    knownOrders.current.clear();
+    sentResponses.current.clear();
+    confirmedRequests.current.clear();
+    setPlacedRiders([]);
+    setRiders({});
+    setOrders([]);
+    setSelectedOrderId(null);
+    setResult(null);
+    setActivity([]);
+    setPlacementEnabled(true);
   }
 
   function connectRider(uid: number, location: Pickup) {
@@ -73,145 +189,357 @@ export function LiveDispatchDemo() {
     updateRider(uid, { message: "连接中…" });
 
     socket.onopen = () => {
+      if (sockets.current.get(uid) !== socket) return;
       socket.send(
         JSON.stringify({ type: "matcher.rider.location", data: { location } }),
       );
-      updateRider(uid, { connected: true, message: "在线，位置已上报" });
+      for (const orderId of knownOrders.current.get(uid) ?? []) {
+        socket.send(JSON.stringify({ type: "matcher.order.status_query", data: { orderId } }));
+      }
+      updateRider(uid, { connected: true, message: "在线，位置已发送" });
+      addActivity(`骑手 ${uid} 已建立 WebSocket 长连接`);
     };
 
     socket.onmessage = (event: MessageEvent<string>) => {
+      if (sockets.current.get(uid) !== socket) return;
       try {
-        const message = JSON.parse(event.data) as {
-          type: string;
-          data?: Offer & { processed?: boolean };
-        };
-        if (message.type === "matcher.order.request" && message.data) {
-          updateRider(uid, { offer: message.data, message: "收到派单请求" });
-        } else if (message.type === "matcher.order.response_ack") {
-          updateRider(uid, {
-            message: message.data?.processed
-              ? "应答已收到，等待派单结果"
-              : "请求已失效",
-          });
+        const message = JSON.parse(event.data) as SocketMessage;
+        const data = message.data;
+        if (message.type === "matcher.order.request" && data?.orderId && data.requestId && data.pickup) {
+          const offer: Offer = {
+            orderId: data.orderId,
+            requestId: data.requestId,
+            pickup: data.pickup,
+            receivedAt: Date.now(),
+          };
+          rememberOrder(uid, offer.orderId);
+          setOrders((current) => current.some((item) => item.orderId === offer.orderId)
+            ? current.map((item) => item.orderId === offer.orderId ? { ...item, status: `邀请骑手 ${uid}，等待回复` } : item)
+            : [...current, { orderId: offer.orderId, pickup: offer.pickup, status: `邀请骑手 ${uid}，等待回复` }]);
+          setSelectedOrderId(offer.orderId);
+          setRiders((current) => ({
+            ...current,
+            [uid]: {
+              ...current[uid],
+              offers: [...current[uid].offers.filter((item) => item.requestId !== offer.requestId), offer],
+              message: "收到派单邀请，等待选择",
+            },
+          }));
+          addActivity(`订单 ${offer.orderId} → 骑手 ${uid}：邀请已到达`);
+        } else if (message.type === "matcher.order.response_ack" && data?.requestId) {
+          const action = sentResponses.current.get(data.requestId);
+          sentResponses.current.delete(data.requestId);
+          const label = data.processed
+            ? action === "decline" ? "拒单已记录，等待重派" : "接单回复已收到，等待最终提交"
+            : "邀请已失效";
+          if (!confirmedRequests.current.has(data.requestId)) {
+            updateRider(uid, { message: label });
+          }
+          addActivity(`骑手 ${uid}：${label}`);
+        } else if (message.type === "matcher.order.assigned" && data?.orderId) {
+          rememberOrder(uid, data.orderId);
+          if (data.requestId) confirmedRequests.current.add(data.requestId);
+          setRiders((current) => ({
+            ...current,
+            [uid]: {
+              ...current[uid],
+              offers: current[uid].offers.filter((item) => item.requestId !== data.requestId),
+              message: `订单 ${data.orderId} 已最终分配`,
+            },
+          }));
+          addActivity(`订单 ${data.orderId} → 骑手 ${uid}：账本提交成功`);
+          setOrders((current) => current.map((item) => item.orderId === data.orderId ? { ...item, status: `骑手 ${uid} 已接单，最终分配` } : item));
+        } else if (message.type === "matcher.order.status" && data?.orderId && data.status) {
+          const label = data.status === "assigned" ? "已最终分配"
+            : data.status === "completed" ? "订单已完成"
+            : data.status === "pending" ? "派单处理中" : "未分配给该骑手";
+          updateRider(uid, { message: `订单 ${data.orderId}：${label}` });
+          addActivity(`骑手 ${uid} 重连查询订单 ${data.orderId}：${label}`);
         }
       } catch {
         updateRider(uid, { message: "收到无法解析的消息" });
       }
     };
 
-    socket.onerror = () => updateRider(uid, { message: "连接失败" });
+    socket.onerror = () => {
+      if (sockets.current.get(uid) === socket) updateRider(uid, { message: "连接失败" });
+    };
     socket.onclose = () => {
       if (sockets.current.get(uid) !== socket) return;
       sockets.current.delete(uid);
-      updateRider(uid, { connected: false, offer: null, message: "已断开" });
+      updateRider(uid, { connected: false, offers: [], message: "已断开，可重新连接查询订单状态" });
+      addActivity(`骑手 ${uid} 的 WebSocket 已断开`);
     };
   }
 
-  function respond(uid: number, accepted: boolean) {
+  function respond(uid: number, offer: Offer, accepted: boolean) {
     const socket = sockets.current.get(uid);
-    const offer = riders[uid].offer;
-    if (!offer || !socket || socket.readyState !== WebSocket.OPEN) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
 
+    sentResponses.current.set(offer.requestId, accepted ? "accept" : "decline");
     socket.send(
       JSON.stringify({
         type: accepted ? "matcher.order.accept" : "matcher.order.decline",
         data: { orderId: offer.orderId, requestId: offer.requestId },
       }),
     );
-    updateRider(uid, { offer: null, message: accepted ? "已接单" : "已拒单" });
+    setRiders((current) => ({
+      ...current,
+      [uid]: {
+        ...current[uid],
+        offers: current[uid].offers.filter((item) => item.requestId !== offer.requestId),
+        message: accepted ? "接单回复已发送，等待服务端确认" : "拒单回复已发送",
+      },
+    }));
+    setOrders((current) => current.map((item) => item.orderId === offer.orderId ? { ...item, status: accepted ? `骑手 ${uid} 已回复接单，等待提交` : `骑手 ${uid} 已拒单，等待重派` } : item));
+    addActivity(`订单 ${offer.orderId}：骑手 ${uid} ${accepted ? "发送接单回复" : "发送拒单回复"}`);
   }
 
   async function submitOrder() {
+    const onlineCount = placedRiders.filter(({ uid }) => riders[uid]?.connected).length;
+    if (onlineCount === 0) return;
+    const effectiveTopK = Math.min(topK, onlineCount);
     setError(null);
     setResult(null);
+    setActivity([]);
+    setOrders([]);
+    setSelectedOrderId(null);
     setIsSubmitting(true);
+    const orderId = runKind === "single" ? newOrderId() : null;
+    const endpoint = runKind === "single" ? "/matcher/live/order" : "/matcher/live/demo";
+    const body = runKind === "single"
+      ? { orderId, pickup, topK: effectiveTopK, maxExtraDistanceMeters: 2000 }
+      : { orderCount: batchCount, batchSize, seed: newOrderId(), topK: effectiveTopK, maxExtraDistanceMeters: 2000, maxOrdersPerRider: capacity };
+    if (orderId !== null) {
+      setOrders([{ orderId, pickup }]);
+      setSelectedOrderId(orderId);
+    }
+    addActivity(runKind === "single"
+      ? `订单 ${orderId} 已提交到实时入口`
+      : `${batchCount} 笔生成订单已提交到实时流水线`);
     try {
-      const response = await fetch("/matcher-api/matcher/live/order", {
+      const response = await fetch(`/matcher-api${endpoint}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          orderId: Date.now(),
-          pickup,
-          topK: 2,
-          maxExtraDistanceMeters: 2000,
-        }),
+        body: JSON.stringify(body),
       });
       const data: LiveResult | { error: string } = await response.json();
       if (!response.ok) {
         throw new Error("error" in data ? data.error : `HTTP ${response.status}`);
       }
-      setResult(data as LiveResult);
+      const liveResult = data as LiveResult;
+      setResult(liveResult);
+      setOrders((current) => {
+        const byId = new Map(current.map((item) => [item.orderId, item]));
+        for (const item of liveResult.orders ?? []) {
+          byId.set(item.ID, { ...byId.get(item.ID), orderId: item.ID, pickup: { latitude: item.Pickup.Latitude, longitude: item.Pickup.Longitude } });
+        }
+        return [...byId.values()].map((item) => {
+          const assignment = (liveResult.Assignments ?? []).find((entry) => entry.OrderID === item.orderId);
+          const lastAttempt = (liveResult.Attempts ?? []).filter((entry) => entry.OrderID === item.orderId).at(-1);
+          return { ...item, status: assignment ? `骑手 ${assignment.RiderUID} 已接单，最终分配` : lastAttempt ? `未分配；最后一次邀请${attemptLabel(lastAttempt.Status)}` : "未找到可派骑手" };
+        });
+      });
+      setSelectedOrderId((current) => current ?? liveResult.orders?.[0]?.ID ?? null);
+      const finishedRequests = new Set((liveResult.Attempts ?? []).map((attempt) => attempt.RequestID));
+      setRiders((current) => Object.fromEntries(
+        Object.entries(current).map(([uid, rider]) => [uid, {
+          ...rider,
+          offers: rider.offers.filter((offer) => !finishedRequests.has(offer.requestId)),
+        }]),
+      ) as Record<number, RiderState>);
+      addActivity(`流水线结束：接单 ${liveResult.AcceptedCount} 笔，未分配 ${liveResult.UnassignedCount} 笔`);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError(message);
+      addActivity(`实时入口失败：${message}`);
     } finally {
       setIsSubmitting(false);
     }
   }
 
+  const onlineCount = placedRiders.filter(({ uid }) => riders[uid]?.connected).length;
+  const attempts = result?.Attempts ?? [];
+  const assignments = result?.Assignments ?? [];
+
   return (
-    <section className="max-w-7xl mx-auto px-4 pt-8 md:px-8 space-y-4">
+    <section className="max-w-7xl mx-auto px-4 py-8 md:px-8 space-y-6">
       <div>
-        <h2 className="text-xl font-semibold text-slate-900">实时派单演示</h2>
+        <h2 className="text-2xl font-semibold text-slate-900">实时入口与 WebSocket 派单</h2>
         <p className="text-sm text-slate-500">
-          先连接两名骑手，再提交订单。拒绝第一位骑手的请求，可以观察重新派单。
+          单笔模式接收订单 ID；多笔模式生成订单流。两者共用候选搜索流水线，并通过骑手长连接等待回复。
         </p>
+        <a href="#live-order-controls" className="mt-2 inline-block text-sm text-blue-700 underline">骑手就绪后，跳转到开始订单流</a>
       </div>
 
-      <div className="grid gap-3 md:grid-cols-2">
-        {RIDERS.map(({ uid, location }) => (
+      <div className="rounded-xl border border-blue-100 bg-blue-50/70 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="font-semibold text-slate-900">后端共用的处理路径</h3>
+          <span className="text-xs text-blue-800">代码路径说明；实际记录见运行结果</span>
+        </div>
+        <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {[
+            ["Producer", "单笔入口或生成订单流"],
+            ["Batch 与对象池", "复用有界队列和缓冲对象"],
+            ["Top-K 候选 worker", "并行搜索附近骑手"],
+            ["协调器与账本", "按序选择并原子预占容量"],
+            ["Offer worker", "有界并发发送 WebSocket 邀请、等待回复"],
+            ["提交或重派", "接单才提交；拒单、超时、投递失败则重选"],
+          ].map(([title, detail], index) => (
+            <div key={title} className="rounded-lg border border-blue-100 bg-white p-3">
+              <p className="text-sm font-semibold text-slate-800"><span className="mr-2 text-blue-600">{index + 1}.</span>{title}</p>
+              <p className="mt-1 text-xs text-slate-500">{detail}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
+        <div className="space-y-3">
+          <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+            <h3 className="font-medium text-slate-800">在地图上布置骑手</h3>
+            <div className="flex flex-wrap items-center gap-3 text-sm">
+              <label>骑手总数
+                <input type="number" min={1} max={20} value={targetCount} disabled={isSubmitting} onChange={(event) => setTargetCount(Math.max(placedRiders.length, Math.min(20, Math.max(1, Number(event.target.value) || 1))))} className="ml-2 w-16 rounded border border-slate-300 px-2 py-1" />
+              </label>
+              <span>已布置 {placedRiders.length} / {targetCount}</span>
+              <button type="button" onClick={() => setPlacementEnabled((value) => !value)} disabled={isSubmitting || placedRiders.length >= targetCount} className="rounded bg-slate-100 px-3 py-1.5 text-slate-700 disabled:opacity-40">{placementEnabled ? "结束地图选点" : "继续地图选点"}</button>
+              <button type="button" onClick={generateRemaining} disabled={isSubmitting || placedRiders.length >= targetCount} className="rounded bg-blue-600 px-3 py-1.5 text-white disabled:opacity-40">自动补足剩余骑手</button>
+              <button type="button" onClick={resetRiders} disabled={isSubmitting || placedRiders.length === 0} className="rounded border border-slate-300 px-3 py-1.5 disabled:opacity-40">重新布置</button>
+            </div>
+            <p className="text-xs text-slate-500">{placementEnabled && placedRiders.length < targetCount ? "点击地图任意位置手动添加骑手，再自动补足剩余数量。" : "地图选点已暂停。可逐个连接或主动退出骑手。"} 演示区域与服务端旧金山坐标范围一致。</p>
+          </div>
+          <LiveDispatchMap
+            riders={placedRiders.map(({ uid, location }) => ({ uid, location, connected: riders[uid]?.connected ?? false, hasOffer: (riders[uid]?.offers.length ?? 0) > 0 }))}
+            orders={orders}
+            attempts={attempts}
+            selectedOrderId={selectedOrderId}
+            topK={Math.min(topK, onlineCount)}
+            extraMeters={2000}
+            placementEnabled={placementEnabled && placedRiders.length < targetCount && !isSubmitting}
+            onPlace={addRider}
+            onSelectOrder={setSelectedOrderId}
+          />
+          {orders.length > 0 && <div className="flex flex-wrap gap-2 rounded-xl border border-slate-200 bg-white p-3 text-xs">
+            <span className="py-1 text-slate-500">订单状态：</span>
+            {orders.map((order) => <button key={order.orderId} type="button" onClick={() => setSelectedOrderId(order.orderId)} className={`rounded px-2 py-1 text-left ${selectedOrderId === order.orderId ? "bg-orange-100 text-orange-800" : "bg-slate-100 text-slate-600"}`}>#{order.orderId}<span className="ml-2">{order.status ?? "搜索骑手中"}</span></button>)}
+          </div>}
+        </div>
+        <div className="max-h-[700px] space-y-3 overflow-y-auto rounded-xl border border-slate-200 bg-slate-100/60 p-3">
+          <h3 className="font-medium text-slate-800">骑手连接与派单回复</h3>
+          {placedRiders.length === 0 && <p className="text-sm text-slate-500">先在地图放置骑手，或自动生成全部骑手。</p>}
+          {placedRiders.map(({ uid, location }) => (
           <div key={uid} className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
             <div className="flex items-center justify-between gap-3">
               <div>
                 <h3 className="font-medium text-slate-800">骑手 {uid}</h3>
-                <p className="text-sm text-slate-500">{riders[uid].message}</p>
+                <p className="text-sm text-slate-500" aria-live="polite">{riders[uid].message}</p>
+                <p className="text-xs text-slate-400">{location.latitude.toFixed(5)}, {location.longitude.toFixed(5)}</p>
               </div>
-              <button
-                type="button"
-                onClick={() => connectRider(uid, location)}
-                disabled={riders[uid].connected}
-                className="rounded-md bg-blue-600 px-3 py-2 text-sm text-white disabled:bg-slate-300"
-              >
-                连接
-              </button>
+              {riders[uid]?.connected ? (
+                <button type="button" onClick={() => disconnectRider(uid)} className="rounded-md bg-slate-700 px-3 py-2 text-sm text-white">主动退出</button>
+              ) : (
+                <button type="button" onClick={() => connectRider(uid, location)} className="rounded-md bg-blue-600 px-3 py-2 text-sm text-white">连接</button>
+              )}
             </div>
-            {riders[uid].offer && (
-              <div className="rounded-md bg-amber-50 p-3 text-sm space-y-2">
-                <p>订单 {riders[uid].offer?.orderId} 等待应答</p>
-                <div className="flex gap-2">
-                  <button type="button" onClick={() => respond(uid, true)} className="rounded bg-emerald-600 px-3 py-1.5 text-white">接单</button>
-                  <button type="button" onClick={() => respond(uid, false)} className="rounded bg-rose-600 px-3 py-1.5 text-white">拒单</button>
-                </div>
-              </div>
-            )}
+            <div className="space-y-2">
+              {riders[uid].offers.map((offer) => {
+                const secondsLeft = Math.max(0, Math.ceil((offer.receivedAt + RESPONSE_WINDOW_MS - clock) / 1000));
+                return (
+                  <div key={offer.requestId} className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm space-y-2">
+                    <p className="font-medium">订单 {offer.orderId} 等待应答</p>
+                    <p className="text-xs text-amber-800">预计应答窗口剩余 {secondsLeft} 秒</p>
+                    <div className="flex gap-2">
+                      <button type="button" onClick={() => respond(uid, offer, true)} disabled={secondsLeft === 0 || !riders[uid].connected} className="rounded bg-emerald-600 px-3 py-1.5 text-white disabled:opacity-40">接单</button>
+                      <button type="button" onClick={() => respond(uid, offer, false)} disabled={secondsLeft === 0 || !riders[uid].connected} className="rounded bg-rose-600 px-3 py-1.5 text-white disabled:opacity-40">拒单</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        ))}
+          ))}
+        </div>
       </div>
 
-      <div className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
-        <h3 className="font-medium text-slate-800">提交一笔订单</h3>
-        <div className="flex flex-wrap gap-3">
-          <label className="text-sm text-slate-600">纬度
-            <input type="number" step="any" value={pickup.latitude} onChange={(event) => setPickup((value) => ({ ...value, latitude: Number(event.target.value) }))} className="ml-2 w-32 rounded border border-slate-300 px-2 py-1" />
-          </label>
-          <label className="text-sm text-slate-600">经度
-            <input type="number" step="any" value={pickup.longitude} onChange={(event) => setPickup((value) => ({ ...value, longitude: Number(event.target.value) }))} className="ml-2 w-32 rounded border border-slate-300 px-2 py-1" />
-          </label>
+      <div className="rounded-xl border border-slate-200 bg-white p-4">
+        <h3 className="font-medium text-slate-800">实时事件</h3>
+        <p className="mt-1 text-xs text-slate-500">记录页面收到的 WebSocket 消息及提交动作；流水线内部指标以服务端响应为准。</p>
+        <ol className="mt-3 max-h-56 space-y-2 overflow-y-auto text-sm" aria-live="polite">
+          {activity.length === 0 && <li className="text-slate-400">连接骑手并提交订单后显示事件。</li>}
+          {activity.map((item) => (
+            <li key={item.id} className="flex gap-3 border-l-2 border-blue-100 pl-3">
+              <time className="shrink-0 text-xs text-slate-400">{item.time}</time>
+              <span className="text-slate-700">{item.text}</span>
+            </li>
+          ))}
+        </ol>
+      </div>
+
+      <div id="live-order-controls" className="rounded-xl border border-slate-200 bg-white p-4 space-y-3">
+        <h3 className="font-medium text-slate-800">选择实时入口</h3>
+        <div role="group" aria-label="实时演示模式" className="flex flex-wrap gap-2">
+          <button type="button" onClick={() => setRunKind("single")} disabled={isSubmitting} className={`rounded px-3 py-2 text-sm ${runKind === "single" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700"}`}>单笔真实订单</button>
+          <button type="button" onClick={() => setRunKind("batch")} disabled={isSubmitting} className={`rounded px-3 py-2 text-sm ${runKind === "batch" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700"}`}>多笔订单流</button>
         </div>
+        {runKind === "single" ? (
+          <div className="flex flex-wrap gap-3">
+            <label className="text-sm text-slate-600">纬度
+              <input type="number" step="any" value={pickup.latitude} onChange={(event) => setPickup((value) => ({ ...value, latitude: Number(event.target.value) }))} className="ml-2 w-32 rounded border border-slate-300 px-2 py-1" />
+            </label>
+            <label className="text-sm text-slate-600">经度
+              <input type="number" step="any" value={pickup.longitude} onChange={(event) => setPickup((value) => ({ ...value, longitude: Number(event.target.value) }))} className="ml-2 w-32 rounded border border-slate-300 px-2 py-1" />
+            </label>
+          </div>
+        ) : (
+          <div className="flex flex-wrap gap-3">
+            <label className="text-sm text-slate-600">订单数
+              <input type="number" min={2} max={8} value={batchCount} onChange={(event) => setBatchCount(Math.max(2, Math.min(8, Number(event.target.value) || 2)))} className="ml-2 w-20 rounded border border-slate-300 px-2 py-1" />
+            </label>
+            <label className="text-sm text-slate-600">Batch 大小
+              <select value={batchSize} onChange={(event) => setBatchSize(Number(event.target.value))} className="ml-2 rounded border border-slate-300 px-2 py-1">
+                <option value={1}>1</option><option value={2}>2</option><option value={4}>4</option>
+              </select>
+            </label>
+            <label className="text-sm text-slate-600">单骑手容量
+              <select value={capacity} onChange={(event) => setCapacity(Number(event.target.value))} className="ml-2 rounded border border-slate-300 px-2 py-1">
+                <option value={0}>不限</option><option value={1}>1 单</option><option value={2}>2 单</option>
+              </select>
+            </label>
+          </div>
+        )}
+        <label className="text-sm text-slate-600">Top-K 候选数
+          <input type="number" min={1} max={Math.max(1, onlineCount)} value={Math.min(topK, Math.max(1, onlineCount))} onChange={(event) => setTopK(Math.max(1, Math.min(Math.max(1, onlineCount), Number(event.target.value) || 1)))} className="ml-2 w-16 rounded border border-slate-300 px-2 py-1" />
+        </label>
+        <p className="text-xs text-slate-500">连接至少两位骑手并将 Top-K 设为 2 或更高，可拒绝首位骑手或等待约 15 秒观察重派。超时、投递失败只在服务端实际发生后显示。</p>
+        <p className="text-xs text-slate-500">已接单订单保存在服务进程的共享账本中，重连可查询；单骑手容量会跨多次订单流累计，直到订单完成或服务重启。</p>
         <button
           type="button"
           onClick={submitOrder}
-          disabled={isSubmitting || !RIDERS.every(({ uid }) => riders[uid].connected)}
+          disabled={isSubmitting || onlineCount === 0}
           className="rounded-md bg-blue-600 px-4 py-2 text-sm text-white disabled:bg-slate-300"
         >
-          {isSubmitting ? "等待骑手应答…" : "提交订单"}
+          {isSubmitting ? "实时派单进行中…" : runKind === "single" ? "提交单笔订单" : `开始 ${batchCount} 笔订单流`}
         </button>
         {error && <p role="alert" className="text-sm text-rose-600">{error}</p>}
         {result && (
           <div className="text-sm text-slate-700 space-y-2">
-            <p>{result.AcceptedCount ? `已分配给骑手 ${result.Assignments[0]?.RiderUID}` : "没有骑手接单"}</p>
-            <ol className="list-decimal pl-5">
-              {result.Attempts.map((attempt) => (
-                <li key={attempt.RequestID}>骑手 {attempt.RiderUID}：{attempt.Status}</li>
+            <p>输入 {result.InputCount} 笔；最终接单 {result.AcceptedCount} 笔；未分配 {result.UnassignedCount} 笔。</p>
+            {result.pipeline && (
+              <div className="grid gap-2 rounded-lg bg-blue-50 p-3 text-xs sm:grid-cols-2">
+                <p>候选 / 邀请 worker：{result.pipeline.candidateWorkers} / {result.pipeline.offerWorkers}</p>
+                <p>Top-K / Batch 大小：{result.pipeline.topK} / {result.pipeline.batchSize}</p>
+                <p>Batch / 候选对象池容量：{result.pipeline.batchPoolCapacity} / {result.pipeline.candidatePoolCapacity}</p>
+                <p>候选队列 / 乱序峰值：{result.pipeline.maxCandidateQueueDepth} / {result.pipeline.maxReorderDepth}</p>
+                <p className="sm:col-span-2">各候选 worker 实际处理：{(result.pipeline.candidateWorkerCompleted ?? []).join(" / ") || "—"} 笔</p>
+              </div>
+            )}
+            {assignments.length > 0 && <p className="font-medium text-emerald-700">最终分配：{assignments.map((item) => `订单 ${item.OrderID} → 骑手 ${item.RiderUID}`).join("；")}</p>}
+            <h4 className="font-medium text-slate-800">逐次邀请结果</h4>
+            <ol className="list-decimal space-y-1 pl-5">
+              {attempts.length === 0 && <li>没有发出邀请。</li>}
+              {attempts.map((attempt) => (
+                <li key={attempt.RequestID}>订单 {attempt.OrderID} → 骑手 {attempt.RiderUID}：{attemptLabel(attempt.Status)}</li>
               ))}
             </ol>
           </div>
