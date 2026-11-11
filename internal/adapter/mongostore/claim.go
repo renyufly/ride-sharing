@@ -32,12 +32,21 @@ func (s *OrderStore) ClaimNext(
 		"nextActionAt": bson.M{"$lte": now},
 		"deadlineAt":   bson.M{"$gt": now},
 	}
-	update := bson.M{"$set": bson.M{
-		"status":       dispatch.ScheduleMatching,
-		"claimToken":   uuid.NewString(),
-		"leaseUntil":   leaseUntil,
-		"nextActionAt": leaseUntil,
-	}}
+	
+	update := bson.M{
+		"$set": bson.M{
+			"status":       dispatch.ScheduleMatching,
+			"claimToken":   uuid.NewString(),
+			"leaseUntil":   leaseUntil,
+			"nextActionAt": leaseUntil,
+		},
+		"$push": bson.M{"trace": traceEntry(dispatch.OrderTraceEvent{
+			Step: "claimed",
+			Pod:  s.podName,
+			At:   now,
+		})},
+	}
+
 	opts := options.FindOneAndUpdate().
 		SetSort(bson.D{{Key: "nextActionAt", Value: 1}, {Key: "_id", Value: 1}}).
 		SetReturnDocument(options.After)
@@ -132,6 +141,15 @@ func (s *OrderStore) EnsureIndexes(ctx context.Context) error {
 			},
 			Options: options.Index().SetName("order_nextdelivery"),
 		},
+	})
+	
+	if err != nil {
+		return err
+	}
+
+	_, err = s.gateways.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "expiresAt", Value: 1}},
+		Options: options.Index().SetExpireAfterSeconds(0),
 	})
 	return err
 }

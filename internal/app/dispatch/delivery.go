@@ -3,6 +3,7 @@ package dispatch
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 )
 
@@ -10,6 +11,7 @@ type deliveryStore interface {
 	ClaimNextDelivery(context.Context, string) (*OfferDelivery, error)
 	IsRiderSessionCurrent(context.Context, RiderSession) (bool, error)
 	StopOfferDelivery(context.Context, OfferDelivery) error
+	RecordOfferSent(context.Context, OfferDelivery) error
 }
 
 func RunOfferDelivery(
@@ -17,7 +19,23 @@ func RunOfferDelivery(
 	gatewayID string,
 	store deliveryStore,
 	send func(context.Context, string, Offer) error,
+	workers int,
 ) {
+	var group sync.WaitGroup
+	for range workers {
+		group.Go(func() {
+			runOfferDeliveryWorker(ctx, gatewayID, store, send)
+		})
+	}
+	group.Wait()
+}
+
+func runOfferDeliveryWorker(
+	ctx context.Context,
+	gatewayID string,
+	store deliveryStore,
+	send func(context.Context, string, Offer) error,
+	) {
 	for ctx.Err() == nil {
 		stepCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		found, err := deliverNextOffer(stepCtx, gatewayID, store, send)
@@ -62,6 +80,10 @@ func deliverNextOffer(
 	cancel()
 	if err != nil {
 		return true, err
+	}
+
+	if err := store.RecordOfferSent(ctx, *delivery); err != nil {
+		log.Printf("record offer delivery %s: %v", delivery.Offer.RequestID, err)
 	}
 
 	return true, store.StopOfferDelivery(ctx, *delivery)

@@ -3,7 +3,7 @@ kind: Deployment
 metadata:
   name: matcher-api
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: matcher-api
@@ -12,6 +12,7 @@ spec:
       labels:
         app: matcher-api
     spec:
+      serviceAccountName: matcher-scaler
       containers:
         - name: matcher-api
           image: ride-sharing/matcher-api
@@ -28,7 +29,26 @@ spec:
           #   # Accessing an env variable from the app-config config map
           #   - name: MATCHER_HTTP_ADDR
           env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: MATCHER_MAX_REPLICAS
+              value: "4"
+            - name: MATCHER_SCALE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: matcher-scaling
+                  key: token
             - name: MATCHER_ASYNC_ORDERS
+              value: "1"
+            - name: MATCHER_SCHEDULER_WORKERS
+              value: "3"
+            - name: MATCHER_DELIVERY_WORKERS
               value: "1"
             - name: MONGODB_URI
               valueFrom:
@@ -52,3 +72,34 @@ spec:
       targetPort: 8082
   selector:
     app: matcher-api
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: matcher-scaler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: matcher-scaler
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["matcher-api"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames: ["matcher-api"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: matcher-scaler
+subjects:
+  - kind: ServiceAccount
+    name: matcher-scaler
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: matcher-scaler

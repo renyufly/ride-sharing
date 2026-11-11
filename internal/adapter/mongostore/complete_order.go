@@ -52,6 +52,12 @@ func (s *OrderStore) completeScheduledOrder(
 			"assignment.riderId": riderID,
 		}, bson.M{
 			"$set": bson.M{"status": dispatch.ScheduleCompleted},
+			"$push": bson.M{"trace": traceEntry(dispatch.OrderTraceEvent{
+				Step:    "completed",
+				Pod:     s.podName,
+				At:      time.Now().UTC(),
+				RiderID: riderID,
+			})},
 		})
 		if err != nil {
 			return nil, err

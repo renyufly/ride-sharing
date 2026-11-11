@@ -15,7 +15,7 @@ const scheduledOrdersPath = "/matcher/v2/live/orders"
 
 type scheduledOrderStore interface {
 	Enqueue(context.Context, uint64, dispatch.ScheduleSpec, time.Time) (dispatch.ScheduleStatus, error)
-	GetStatus(context.Context, uint64) (dispatch.ScheduleStatus, error)
+	GetOrder(context.Context, uint64) (dispatch.ScheduledOrderDetails, error)
 }
 
 type scheduledOrderResponse struct {
@@ -65,7 +65,7 @@ func RegisterScheduledOrderRoutes(mux *http.ServeMux, store scheduledOrderStore)
 			return
 		}
 
-		status, err := store.GetStatus(r.Context(), id)
+		details, err := store.GetOrder(r.Context(), id)
 		if errors.Is(err, dispatch.ErrScheduledOrderNotFound) {
 			_ = writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "order not found"})
 			return
@@ -77,9 +77,6 @@ func RegisterScheduledOrderRoutes(mux *http.ServeMux, store scheduledOrderStore)
 		}
 
 		w.Header().Set("Cache-Control", "no-store")
-		_ = writeJSON(w, http.StatusOK, scheduledOrderResponse{
-			OrderID: strconv.FormatUint(id, 10),
-			Status:  status,
-		})
+		_ = writeJSON(w, http.StatusOK, details)
 	})
 }

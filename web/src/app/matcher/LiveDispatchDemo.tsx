@@ -3,6 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import dynamic from "next/dynamic";
 import type { MapOrder } from "./LiveDispatchMap";
+import { MatcherReplicaControls } from "./MatcherReplicaControls";
+import { OrderDispatchTrace, type OrderTraceEvent } from "./OrderDispatchTrace";
 
 const LiveDispatchMap = dynamic(() => import("./LiveDispatchMap").then((module) => module.LiveDispatchMap), { ssr: false });
 
@@ -36,7 +38,13 @@ type LiveResult = {
   };
 };
 
-type Activity = { id: number; time: string; text: string };
+type DispatchObservation = {
+  orderId: number;
+  source: "HTTP" | "WebSocket" | "页面";
+  riderUid?: number;
+  requestId?: string;
+};
+type Activity = { id: number; time: string; text: string; observation?: DispatchObservation };
 type SocketMessage = { type: string; data?: {
   orderId?: number; requestId?: string; pickup?: Pickup;
   processed?: boolean; status?: string; error?: string;
@@ -59,19 +67,25 @@ const scheduledStatusLabels = {
   completed: "订单已完成",
 };
 type ScheduledStatus = keyof typeof scheduledStatusLabels;
+type ScheduledOrder = {
+  status: ScheduledStatus;
+  receivedPod?: string;
+  createdAt?: string;
+  trace?: OrderTraceEvent[];
+};
 
 function isDispatchFinished(status: ScheduledStatus | null): boolean {
   return status === "assigned" || status === "unassigned" || status === "completed";
 }
 
-async function readScheduledStatus(response: Response, orderId: number): Promise<ScheduledStatus> {
-  const data: { orderId?: string; status?: string; error?: string } | null = await response.json().catch(() => null);
+async function readScheduledOrder(response: Response, orderId: number): Promise<ScheduledOrder> {
+  const data: (Partial<ScheduledOrder> & { orderId?: string; error?: string }) | null = await response.json().catch(() => null);
   if (!response.ok) throw new Error(data?.error ?? `HTTP ${response.status}`);
   const status = data?.status;
   if (data?.orderId !== String(orderId) || !status || !Object.hasOwn(scheduledStatusLabels, status)) {
     throw new Error("异步订单接口返回了无效的订单状态");
   }
-  return status as ScheduledStatus;
+  return { status, receivedPod: data.receivedPod, createdAt: data.createdAt, trace: data.trace };
 }
 
 function waitForStatusPoll(signal: AbortSignal): Promise<void> {
@@ -123,6 +137,7 @@ export function LiveDispatchDemo() {
   const confirmedRequests = useRef(new Set<string>());
   const submission = useRef<AbortController | null>(null);
   const trackedOrder = useRef<{ id: number; status: ScheduledStatus | null } | null>(null);
+  const traceRefreshId = useRef(0);
   const nextActivityId = useRef(0);
   const nextRiderUid = useRef(101);
   const [riders, setRiders] = useState<Record<number, RiderState>>({});
@@ -134,6 +149,10 @@ export function LiveDispatchDemo() {
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
   const [topK, setTopK] = useState(3);
   const [activity, setActivity] = useState<Activity[]>([]);
+  const [asyncOrderId, setAsyncOrderId] = useState<number | null>(null);
+  const [orderDetails, setOrderDetails] = useState<ScheduledOrder | null>(null);
+  const [traceError, setTraceError] = useState("");
+  const [refreshingTrace, setRefreshingTrace] = useState(false);
   const [clock, setClock] = useState(Date.now());
   const [runKind, setRunKind] = useState<RunKind>("batch");
   const [batchCount, setBatchCount] = useState(4);
@@ -156,13 +175,21 @@ export function LiveDispatchDemo() {
       const activeSubmission = submission.current;
       submission.current = null;
       activeSubmission?.abort();
+      trackedOrder.current = null;
       for (const socket of activeSockets.values()) socket.close();
       activeSockets.clear();
     };
   }, []);
 
-  function addActivity(text: string) {
-    const item = { id: ++nextActivityId.current, time: new Date().toLocaleTimeString(), text };
+  function addActivity(text: string, observation?: DispatchObservation) {
+    const item = {
+      id: ++nextActivityId.current,
+      time: new Date().toLocaleTimeString(undefined, {
+        hour: "2-digit", minute: "2-digit", second: "2-digit", fractionalSecondDigits: 3,
+      }),
+      text,
+      observation,
+    };
     setActivity((current) => [...current.slice(-39), item]);
   }
 
@@ -236,6 +263,10 @@ export function LiveDispatchDemo() {
     sentResponses.current.clear();
     confirmedRequests.current.clear();
     trackedOrder.current = null;
+    setAsyncOrderId(null);
+    setOrderDetails(null);
+    setTraceError("");
+    setRefreshingTrace(false);
     setOrders([]);
     setSelectedOrderId(null);
     setResult(null);
@@ -324,7 +355,9 @@ export function LiveDispatchDemo() {
               message: "收到派单邀请，等待选择",
             },
           }));
-          addActivity(`订单 ${offer.orderId} → 骑手 ${uid}：邀请已到达`);
+          addActivity(`订单 ${offer.orderId} → 骑手 ${uid}：邀请已到达`, {
+            orderId: offer.orderId, source: "WebSocket", riderUid: uid, requestId: offer.requestId,
+          });
         } else if (message.type === "matcher.order.response_ack" && data?.requestId) {
           const action = sentResponses.current.get(data.requestId);
           sentResponses.current.delete(data.requestId);
@@ -334,7 +367,9 @@ export function LiveDispatchDemo() {
           if (!confirmedRequests.current.has(data.requestId)) {
             updateRider(uid, { message: label });
           }
-          addActivity(`骑手 ${uid}：${label}`);
+          addActivity(`骑手 ${uid}：${label}`, data.orderId ? {
+            orderId: data.orderId, source: "WebSocket", riderUid: uid, requestId: data.requestId,
+          } : undefined);
         } else if (message.type === "matcher.order.assigned" && data?.orderId) {
           rememberOrder(uid, data.orderId);
           setRiderOrder(kind, uid, data.orderId, { status: "assigned" });
@@ -347,7 +382,9 @@ export function LiveDispatchDemo() {
               message: `订单 ${data.orderId} 已最终分配`,
             },
           }));
-          addActivity(`订单 ${data.orderId} → 骑手 ${uid}：账本提交成功`);
+          addActivity(`订单 ${data.orderId} → 骑手 ${uid}：账本提交成功`, {
+            orderId: data.orderId, source: "WebSocket", riderUid: uid, requestId: data.requestId,
+          });
           if (trackedOrder.current?.id !== data.orderId) {
             setOrders((current) => current.map((item) => item.orderId === data.orderId ? { ...item, status: `骑手 ${uid} 已接单，最终分配` } : item));
           }
@@ -355,7 +392,7 @@ export function LiveDispatchDemo() {
           const orderId = data.orderId;
           if (data.error) {
             setRiderOrder(kind, uid, orderId, { status: "assigned", error: data.error });
-            addActivity(`订单 ${orderId}：${data.error}`);
+            addActivity(`订单 ${orderId}：${data.error}`, { orderId, source: "WebSocket", riderUid: uid });
             return;
           }
           if (data.status === "assigned" || data.status === "completed") {
@@ -364,6 +401,7 @@ export function LiveDispatchDemo() {
           if (data.status === "completed") {
             if (trackedOrder.current?.id === orderId) {
               trackedOrder.current = { id: orderId, status: "completed" };
+              void refreshOrderTrace(orderId);
             }
             setOrders((current) => current.map((item) => item.orderId === orderId
               ? { ...item, status: scheduledStatusLabels.completed }
@@ -373,7 +411,7 @@ export function LiveDispatchDemo() {
             : data.status === "completed" ? "订单已完成"
             : data.status === "pending" ? "派单处理中" : "未分配给该骑手";
           updateRider(uid, { message: `订单 ${orderId}：${label}` });
-          addActivity(`骑手 ${uid} · 订单 ${orderId}：${label}`);
+          addActivity(`骑手 ${uid} · 订单 ${orderId}：${label}`, { orderId, source: "WebSocket", riderUid: uid });
         }
       } catch {
         updateRider(uid, { message: "收到无法解析的消息" });
@@ -413,7 +451,9 @@ export function LiveDispatchDemo() {
     if (trackedOrder.current?.id !== offer.orderId) {
       setOrders((current) => current.map((item) => item.orderId === offer.orderId ? { ...item, status: accepted ? `骑手 ${uid} 已回复接单，等待提交` : `骑手 ${uid} 已拒单，等待重派` } : item));
     }
-    addActivity(`订单 ${offer.orderId}：骑手 ${uid} ${accepted ? "发送接单回复" : "发送拒单回复"}`);
+    addActivity(`订单 ${offer.orderId}：骑手 ${uid} ${accepted ? "发送接单回复" : "发送拒单回复"}`, {
+      orderId: offer.orderId, source: "页面", riderUid: uid, requestId: offer.requestId,
+    });
   }
 
   function completeRiderOrder(uid: number, orderId: number) {
@@ -424,8 +464,28 @@ export function LiveDispatchDemo() {
     try {
       socket.send(JSON.stringify({ type: "matcher.order.complete", data: { orderId } }));
       setRiderOrder(runKind, uid, orderId, { status: "completing" });
+      addActivity(`骑手 ${uid} 已提交完成请求`, { orderId, source: "页面", riderUid: uid });
     } catch {
       setRiderOrder(runKind, uid, orderId, { status: "assigned", error: "发送失败，请重新连接后重试" });
+    }
+  }
+
+  async function refreshOrderTrace(orderId: number) {
+    const refreshId = ++traceRefreshId.current;
+    const isCurrent = () => trackedOrder.current?.id === orderId && traceRefreshId.current === refreshId;
+    setRefreshingTrace(true);
+    setTraceError("");
+    try {
+      const response = await fetch(`${SCHEDULED_ORDERS_URL}/${orderId}`, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(10_000),
+      });
+      const details = await readScheduledOrder(response, orderId);
+      if (isCurrent()) setOrderDetails(details);
+    } catch (cause) {
+      if (isCurrent()) setTraceError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      if (isCurrent()) setRefreshingTrace(false);
     }
   }
 
@@ -436,7 +496,9 @@ export function LiveDispatchDemo() {
       await waitForStatusPoll(signal);
       response = await fetch(SCHEDULED_ORDERS_URL, request);
     }
-    let status = await readScheduledStatus(response, orderId);
+    let { status } = await readScheduledOrder(response, orderId);
+    signal.throwIfAborted();
+    addActivity(`下单接口已响应（HTTP ${response.status}）`, { orderId, source: "HTTP" });
 
     for (;;) {
       signal.throwIfAborted();
@@ -445,13 +507,14 @@ export function LiveDispatchDemo() {
         trackedOrder.current = { id: orderId, status };
         const label = scheduledStatusLabels[status];
         setOrders((current) => current.map((item) => item.orderId === orderId ? { ...item, status: label } : item));
-        addActivity(`订单 ${orderId}：${label}`);
+        addActivity(`订单 ${orderId}：${label}`, { orderId, source: "HTTP" });
       }
       if (isDispatchFinished(status)) {
         setRiders((current) => Object.fromEntries(Object.entries(current).map(([uid, rider]) => [uid, {
           ...rider,
           offers: rider.offers.filter((offer) => offer.orderId !== orderId),
         }])));
+        void refreshOrderTrace(orderId);
         return;
       }
 
@@ -462,8 +525,11 @@ export function LiveDispatchDemo() {
         setError(`暂时无法查询订单 ${orderId}，正在重试。`);
         continue;
       }
-      status = await readScheduledStatus(next, orderId);
+      const details = await readScheduledOrder(next, orderId);
       signal.throwIfAborted();
+      if (trackedOrder.current?.status === "completed") return;
+      status = details.status;
+      setOrderDetails(details);
       setError(null);
     }
   }
@@ -496,12 +562,18 @@ export function LiveDispatchDemo() {
     };
     if (orderId !== null) {
       trackedOrder.current = { id: orderId, status: null };
+      setAsyncOrderId(orderId);
+      setOrderDetails(null);
+      setTraceError("");
+      setRefreshingTrace(false);
       setOrders([{ orderId, pickup, status: "正在提交" }]);
       setSelectedOrderId(orderId);
     }
-    addActivity(orderId !== null
-      ? `正在提交异步订单 ${orderId}`
-      : `${batchCount} 笔生成订单已提交到实时流水线`);
+    if (orderId !== null) {
+      addActivity(`正在提交异步订单 ${orderId}`, { orderId, source: "页面" });
+    } else {
+      addActivity(`${batchCount} 笔生成订单已提交到实时流水线`);
+    }
     try {
       if (orderId !== null) {
         await submitScheduledOrder(orderId, request, controller.signal);
@@ -545,7 +617,7 @@ export function LiveDispatchDemo() {
       const failure = controller.signal.aborted ? controller.signal.reason : cause;
       const message = failure instanceof Error ? failure.message : String(failure);
       setError(message);
-      addActivity(`实时入口失败：${message}`);
+      addActivity(`实时入口失败：${message}`, orderId === null ? undefined : { orderId, source: "页面" });
       if (orderId !== null) {
         const label = trackedOrder.current?.status ? "状态查询中断" : "提交结果未确认";
         setOrders((current) => current.map((item) => item.orderId === orderId ? { ...item, status: label } : item));
@@ -563,14 +635,8 @@ export function LiveDispatchDemo() {
   const maxTopK = runKind === "single" ? targetCount : Math.max(1, onlineCount);
   const attempts = result?.Attempts ?? [];
   const assignments = result?.Assignments ?? [];
-  const flowSteps = runKind === "single" ? [
-    ["提交订单", "异步入口写入订单并返回 202"],
-    ["领取订单", "调度 worker 按租约领取"],
-    ["Top-K 候选", "从在线骑手快照中选人"],
-    ["容量预占", "事务写入邀请并预占骑手容量"],
-    ["定向投递", "持有连接的网关发送 WebSocket 邀请"],
-    ["提交或重派", "接单后确认，拒单或超时则重派"],
-  ] : [
+  const orderActivity = activity.filter((item) => item.observation?.orderId === asyncOrderId);
+  const flowSteps = [
     ["Producer", "生成订单流"],
     ["Batch 与对象池", "复用有界队列和缓冲对象"],
     ["Top-K 候选 worker", "并行搜索附近骑手"],
@@ -589,9 +655,52 @@ export function LiveDispatchDemo() {
         <a href="#live-order-controls" className="mt-2 inline-block text-sm text-blue-700 underline">骑手就绪后，跳转到开始订单流</a>
       </div>
 
+      {runKind === "single" ? (
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+          <MatcherReplicaControls />
+          <div className="min-w-0 space-y-3 rounded-xl border border-slate-200 bg-white p-4">
+            <h3 className="font-medium text-slate-900">单笔订单调度记录</h3>
+            {asyncOrderId === null ? (
+              <p className="text-sm text-slate-500">提交单笔异步订单后显示事件。</p>
+            ) : (
+              <>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="break-all text-sm font-medium text-slate-800">订单 #{asyncOrderId}</p>
+                  <button type="button" disabled={isSubmitting || refreshingTrace}
+                    onClick={() => void refreshOrderTrace(asyncOrderId)}
+                    className="rounded border border-slate-300 px-3 py-1.5 text-sm disabled:opacity-40">
+                    {refreshingTrace ? "正在刷新…" : "刷新调度记录"}
+                  </button>
+                </div>
+                {orderDetails && <p className="text-sm text-slate-600">{scheduledStatusLabels[orderDetails.status]}</p>}
+                {traceError && <p role="alert" className="text-sm text-red-700">调度记录查询失败（{traceError}）</p>}
+                <OrderDispatchTrace receivedPod={orderDetails?.receivedPod} createdAt={orderDetails?.createdAt} trace={orderDetails?.trace} />
+                <details className="text-sm text-slate-600">
+                  <summary className="cursor-pointer">浏览器回执（{orderActivity.length} 条）</summary>
+                  <ol className="mt-2 max-h-48 list-none space-y-2 overflow-y-auto" aria-label="浏览器回执">
+                    {orderActivity.map(({ id, time, text, observation }) => (
+                      <li key={id} className="border-l-2 border-blue-200 pl-3 text-sm text-slate-800">
+                        <p><time className="mr-2 font-mono text-xs text-slate-500">{time}</time><span className="mr-2 text-xs font-medium text-blue-700">{observation?.source}</span>{text}</p>
+                        {observation && (observation.riderUid !== undefined || observation.requestId) && (
+                          <p className="flex flex-wrap gap-x-3 break-all font-mono text-xs text-slate-500">
+                            {observation.riderUid !== undefined && <span>riderUid {observation.riderUid}</span>}
+                            {observation.requestId && <span>requestId {observation.requestId}</span>}
+                          </p>
+                        )}
+                      </li>
+                    ))}
+                  </ol>
+                </details>
+              </>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {runKind === "batch" && (
       <div className="rounded-xl border border-blue-100 bg-blue-50/70 p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="font-semibold text-slate-900">{runKind === "single" ? "单笔异步调度路径" : "多笔订单流处理路径"}</h3>
+          <h3 className="font-semibold text-slate-900">多笔订单流处理路径</h3>
           <span className="text-xs text-blue-800">代码路径说明；实际记录见运行结果</span>
         </div>
         <div className="mt-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -603,6 +712,7 @@ export function LiveDispatchDemo() {
           ))}
         </div>
       </div>
+      )}
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
         <div className="space-y-3">

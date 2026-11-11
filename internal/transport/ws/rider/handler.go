@@ -48,7 +48,8 @@ func NewHandler(
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				origin := r.Header.Get("Origin")
-				return origin == "" || origin == "http://localhost:3000"
+				return origin == "" || origin == "http://localhost:3000"  ||
+        			   origin == "http://localhost:13000"
 			},
 		},
 		readLimitBytes: readLimitBytes,

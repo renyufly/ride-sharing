@@ -58,6 +58,14 @@ func (s *OrderStore) CreateOffer(
 			return nil, errOfferNotCreated
 		}
 
+		live, err := s.gatewayIsLive(tx, rider.GatewayID, now)
+		if err != nil {
+			return nil, err
+		}
+		if !live {
+			return nil, errOfferNotCreated
+		}
+
 		orderFilter := bson.M{
 			"_id":               orderID,
 			"status":            dispatch.ScheduleMatching,
@@ -81,7 +89,16 @@ func (s *OrderStore) CreateOffer(
 					DistanceSquaredMeters: distanceSquaredMeters,
 				},
 			},
-			"$push":  bson.M{"attemptedRiderIds": riderID},
+			"$push": bson.M{
+				"attemptedRiderIds": riderID,
+				"trace": traceEntry(dispatch.OrderTraceEvent{
+					Step:      "offer_created",
+					Pod:       s.podName,
+					At:        now,
+					RequestID: requestID,
+					RiderID:   riderID,
+				}),
+			},
 			"$unset": bson.M{"claimToken": "", "leaseUntil": ""},
 		}
 		result, err := s.orders.UpdateOne(tx, orderFilter, orderUpdate)

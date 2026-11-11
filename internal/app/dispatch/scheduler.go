@@ -9,7 +9,6 @@ import (
 
 // TODO: 待修改成config
 const (
-	schedulerWorkers = 2
 	claimLease       = 5 * time.Second
 	idleDelay        = 250 * time.Millisecond
 	noCandidateDelay = time.Second
@@ -29,9 +28,9 @@ type schedulerStore interface {
 // It returns false, nil when the order should be retried after a delay.
 type ClaimProcessor func(context.Context, ClaimedOrder) (bool, error)
 
-func RunScheduler(ctx context.Context, store schedulerStore, process ClaimProcessor) {
+func RunScheduler(ctx context.Context, store schedulerStore, process ClaimProcessor, workers int) {
 	var group sync.WaitGroup
-	for range schedulerWorkers {
+	for range workers {
 		group.Go(func() {
 			runClaimWorker(ctx, store, process)
 		})

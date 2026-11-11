@@ -23,9 +23,11 @@ import (
 type OrderStore struct {
 	orders *mongo.Collection
 	riders *mongo.Collection
+	gateways *mongo.Collection
+	podName string
 }
 
-func NewOrderStore(db *mongo.Database) *OrderStore {
+func NewOrderStore(db *mongo.Database, podName string) *OrderStore {
 	// Primary 负责接收写入，Secondary 复制数据
 	opt := options.Collection().
 			SetReadPreference(readpref.Primary()).
@@ -34,6 +36,8 @@ func NewOrderStore(db *mongo.Database) *OrderStore {
 	return &OrderStore{
 		orders: db.Collection("matcher_orders", opt),
 		riders: db.Collection("matcher_riders", opt),
+		gateways: db.Collection("matcher_gateways", opt),
+		podName: podName,
 	}
 }
 
@@ -56,6 +60,8 @@ type orderDocument struct {
 	Offer        *offerDocument          `bson:"offer,omitempty"`
 	AttemptedRiderIDs []string           `bson:"attemptedRiderIds,omitempty"`
 	Assignment   *assignmentDocument     `bson:"assignment,omitempty"`
+	ReceivedPod  string                     `bson:"receivedPod,omitempty"`
+	Trace        []dispatch.OrderTraceEvent `bson:"trace,omitempty"`
 }
 
 type offerDocument struct {
@@ -95,6 +101,7 @@ func (s *OrderStore) Enqueue(
 		CreatedAt:    now,
 		NextActionAt: now,
 		DeadlineAt:   deadlineAt.UTC(),
+		ReceivedPod: s.podName,
 	}
 
 	// 尝试写入 MongoDB
@@ -119,19 +126,25 @@ func (s *OrderStore) Enqueue(
 	return existing.Status, nil
 }
 
-func (s *OrderStore) GetStatus(
+func (s *OrderStore) GetOrder(
 	ctx context.Context, orderID uint64,
-) (dispatch.ScheduleStatus, error) {
+) (dispatch.ScheduledOrderDetails, error) {
 	var doc orderDocument
 	filter := bson.M{"_id": strconv.FormatUint(orderID, 10)}
 	err := s.orders.FindOne(ctx, filter).Decode(&doc)
 	if errors.Is(err, mongo.ErrNoDocuments) {
-		return "", dispatch.ErrScheduledOrderNotFound
+		return dispatch.ScheduledOrderDetails{}, dispatch.ErrScheduledOrderNotFound
 	}
 	if err != nil {
-		return "", fmt.Errorf("read matcher order %d: %w", orderID, err)
+		return dispatch.ScheduledOrderDetails{}, fmt.Errorf("read matcher order %d: %w", orderID, err)
 	}
-	return doc.Status, nil
+	return dispatch.ScheduledOrderDetails{
+		OrderID:     doc.ID,
+		Status:      doc.Status,
+		ReceivedPod: doc.ReceivedPod,
+		CreatedAt:   doc.CreatedAt,
+		Trace:       doc.Trace,
+	}, nil
 }
 
 func (s *OrderStore) ScheduledStatusForRider(

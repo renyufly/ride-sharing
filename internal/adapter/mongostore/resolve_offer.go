@@ -38,9 +38,18 @@ func (s *OrderStore) RespondToOffer(
 }
 
 func (s *OrderStore) ExpireNextOffer(ctx context.Context) (bool, error) {
+	now := time.Now().UTC()
+	gatewayIDs, err := s.liveGatewayIDs(ctx, now)
+	if err != nil {
+		return false, err
+	}
+
 	filter := bson.M{
-		"status":       dispatch.ScheduleOffered,
-		"nextActionAt": bson.M{"$lte": time.Now().UTC()},
+		"status": dispatch.ScheduleOffered,
+		"$or": bson.A{
+			bson.M{"nextActionAt": bson.M{"$lte": now}},
+			bson.M{"offer.gatewayId": bson.M{"$nin": gatewayIDs}},
+		},
 	}
 	opts := options.FindOne().SetSort(bson.D{
 		{Key: "nextActionAt", Value: 1},
@@ -48,7 +57,7 @@ func (s *OrderStore) ExpireNextOffer(ctx context.Context) (bool, error) {
 	})
 
 	var doc orderDocument
-	err := s.orders.FindOne(ctx, filter, opts).Decode(&doc)
+	err = s.orders.FindOne(ctx, filter, opts).Decode(&doc)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return false, nil
 	}
@@ -120,9 +129,23 @@ func (s *OrderStore) resolveOfferInTransaction(
 		"offer.requestId": requestID,
 	}
 	riderFilter := bson.M{"_id": doc.Offer.RiderID}
-	if reply == nil {
-		orderFilter["offer.expiresAt"] = bson.M{"$lte": now}
-	} else {
+	
+	if reply != nil || doc.Offer.ExpiresAt.After(now) {
+		live, err := s.gatewayIsLive(tx, doc.Offer.GatewayID, now)
+		if err != nil {
+			return err
+		}
+
+		// 未到回复截止时间时，只有失联网关的邀请可以提前回收。
+		if reply == nil && live {
+			return errOfferUnchanged
+		}
+		if reply != nil && !live {
+			return errOfferUnchanged
+		}
+	}
+
+	if reply != nil {
 		riderFilter = riderSessionFilter(reply.route)
 		riderFilter["presenceUntil"] = bson.M{"$gt": now}
 		orderFilter["offer.expiresAt"] = bson.M{"$gt": now}
@@ -130,6 +153,7 @@ func (s *OrderStore) resolveOfferInTransaction(
 		orderFilter["offer.gatewayId"] = reply.route.GatewayID
 		orderFilter["offer.sessionId"] = reply.route.SessionID
 	}
+
 	riderFilter["reserved"] = bson.M{"$gt": 0}
 
 	set := bson.M{"status": dispatch.ScheduleUnassigned}
@@ -151,9 +175,26 @@ func (s *OrderStore) resolveOfferInTransaction(
 		delete(unset, "nextActionAt")
 	}
 
+	step := "offer_released"
+	if reply != nil {
+		step = "offer_declined"
+		if reply.accepted {
+			step = "assigned"
+		}
+	}
+
 	result, err := s.orders.UpdateOne(tx, orderFilter, bson.M{
-		"$set": set, "$unset": unset,
+		"$set":   set,
+		"$unset": unset,
+		"$push": bson.M{"trace": traceEntry(dispatch.OrderTraceEvent{
+			Step:      step,
+			Pod:       s.podName,
+			At:        now,
+			RequestID: requestID,
+			RiderID:   doc.Offer.RiderID,
+		})},
 	})
+
 	if err != nil {
 		return err
 	}

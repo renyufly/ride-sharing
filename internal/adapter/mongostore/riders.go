@@ -123,8 +123,15 @@ func riderSessionFilter(route dispatch.RiderSession) bson.M {
 
 // ListOnlineRiders 从 MongoDB 查询所有在线骑手
 func (s *OrderStore) ListOnlineRiders(ctx context.Context) ([]dispatch.OnlineRider, error) {
+	now := time.Now().UTC()
+	gatewayIDs, err := s.liveGatewayIDs(ctx, now)
+	if err != nil || len(gatewayIDs) == 0 {
+		return nil, err
+	}
+
 	cursor, err := s.riders.Find(ctx, bson.M{
-		"presenceUntil": bson.M{"$gt": time.Now().UTC()},
+		"gatewayId":     bson.M{"$in": gatewayIDs},
+		"presenceUntil": bson.M{"$gt": now},
 		"locationAt":    bson.M{"$exists": true},
 	})
 	if err != nil {
@@ -159,10 +166,15 @@ func (s *OrderStore) ListOnlineRiders(ctx context.Context) ([]dispatch.OnlineRid
 func (s *OrderStore) IsRiderSessionCurrent(
 	ctx context.Context, route dispatch.RiderSession,
 ) (bool, error) {
-	filter := riderSessionFilter(route)
-	filter["presenceUntil"] = bson.M{"$gt": time.Now().UTC()}
+	now := time.Now().UTC()
+	live, err := s.gatewayIsLive(ctx, route.GatewayID, now)
+	if err != nil || !live {
+		return false, err
+	}
 
-	err := s.riders.FindOne(ctx, filter).Err()
+	filter := riderSessionFilter(route)
+	filter["presenceUntil"] = bson.M{"$gt": now}
+	err = s.riders.FindOne(ctx, filter).Err()
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return false, nil
 	}

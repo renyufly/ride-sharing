@@ -6,6 +6,7 @@ import 'leaflet/dist/leaflet.css';
 import icon from 'leaflet/dist/images/marker-icon.png'
 import iconShadow from 'leaflet/dist/images/marker-shadow.png'
 import dynamic from 'next/dynamic'
+import Link from 'next/link'
 import { Button } from "../components/ui/button";
 import { useState, Suspense } from "react";
 import { useSearchParams, useRouter } from 'next/navigation';
@@ -87,6 +88,9 @@ function HomeContent() {
                 onClick={() => handleClick("driver")}
               >
                 I Want to Drive
+              </Button>
+              <Button asChild className="w-full text-lg py-6" variant="outline">
+                <Link href="/matcher">Open Matching System</Link>
               </Button>
             </div>
           </div>

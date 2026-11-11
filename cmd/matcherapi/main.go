@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"ride-sharing/internal/adapter/kubernetes"
 	"ride-sharing/internal/adapter/mongostore"
 	"ride-sharing/internal/adapter/realtime"
 	"ride-sharing/internal/app/dispatch"
@@ -35,6 +36,25 @@ func main() {
 	handler := runhttp.NewHandler()
 
 	mux := newMux(handler)
+
+	if scaleToken := os.Getenv("MATCHER_SCALE_TOKEN"); scaleToken != "" {
+		namespace := os.Getenv("POD_NAMESPACE")
+		if namespace == "" {
+			log.Fatal("POD_NAMESPACE is required when matcher scaling is enabled")
+		}
+
+		// TODO: "MATCHER_MAX_REPLICAS", "4"
+		maxReplicas, err := strconv.ParseInt(env.GetString("MATCHER_MAX_REPLICAS", "4"), 10, 32)
+		if err != nil || maxReplicas < 1 {
+			log.Fatal("MATCHER_MAX_REPLICAS must be a positive integer")
+		}
+
+		scaler, err := kubernetes.NewMatcherScaler(namespace)
+		if err != nil {
+			log.Fatalf("configure matcher scaling: %v", err)
+		}
+		runhttp.RegisterReplicaRoutes(mux, scaler, scaleToken, int32(maxReplicas))
+	}
 
 	// 建立骑手连接
 	realtimeConfig := config.DefaultRealtime()
@@ -75,6 +95,10 @@ func main() {
 	}
 
 	if os.Getenv("MATCHER_ASYNC_ORDERS") == "1" {
+		dispatchConfig, err := config.LoadDispatchRuntime()
+		if err != nil {
+			log.Fatalf("load dispatch runtime config: %v", err)
+		}
 		mongoConfig := db.NewMongoDefaultConfig()
 		client, err := db.NewMongoClient(serviceCtx, mongoConfig)
 		if err != nil {
@@ -88,8 +112,12 @@ func main() {
 			}
 		}()
 
-		store := mongostore.NewOrderStore(db.GetDatabase(client, mongoConfig))
-		
+		podName := os.Getenv("POD_NAME")
+		if podName == "" {
+			podName, _ = os.Hostname()
+		}
+		store := mongostore.NewOrderStore(db.GetDatabase(client, mongoConfig), podName)
+
 		indexCtx, cancelIndexes := context.WithTimeout(serviceCtx, 20*time.Second)
 		indexErr := store.EnsureIndexes(indexCtx)
 		cancelIndexes()
@@ -116,20 +144,43 @@ func main() {
 			log.Fatalf("create scheduled order processor: %v", err)
 		}
 
+		heartbeatDone, err := startGatewayHeartbeat(serviceCtx, store, gatewayID)
+		if err != nil {
+			log.Fatalf("register matcher gateway: %v", err)
+		}
+
+		log.Printf(
+			"starting async dispatch: scheduler_workers=%d delivery_workers=%d",
+			dispatchConfig.SchedulerWorkers,
+			dispatchConfig.DeliveryWorkers,
+		)
+
 		schedulerDone := make(chan struct{})
 		go func() {
 			defer close(schedulerDone)
-			dispatch.RunScheduler(serviceCtx, store, processor.process)
+			dispatch.RunScheduler(
+				serviceCtx,
+				store,
+				processor.process,
+				dispatchConfig.SchedulerWorkers,
+			)
 		}()
 
 		deliveryDone := make(chan struct{})
 		go func() {
 			defer close(deliveryDone)
-			dispatch.RunOfferDelivery(serviceCtx, gatewayID, store, connections.SendScheduledOffer)
+			dispatch.RunOfferDelivery(
+				serviceCtx,
+				gatewayID,
+				store,
+				connections.SendScheduledOffer,
+				dispatchConfig.DeliveryWorkers,
+			)
 		}()
 
 		defer func() {
 			stopService()
+			<-heartbeatDone
 			<-schedulerDone
 			<-deliveryDone
 		}()
